@@ -10,6 +10,8 @@ See: https://github.com/NousResearch/hermes-agent/issues/1264
 
 import os
 import threading
+
+import pytest
 from unittest.mock import MagicMock, patch
 
 from tools.environments.local import (
@@ -307,6 +309,8 @@ class TestSanePathIncludesHomebrew:
         _SANE_PATH which now includes Homebrew dirs."""
         from tools.environments.local import _make_run_env
         minimal_env = {"PATH": "/some/custom/bin"}
+        if os.name != "posix":
+            pytest.skip("POSIX PATH augmentation is not exercised on this OS")
         with patch.dict(os.environ, minimal_env, clear=True):
             result = _make_run_env({})
         assert "/opt/homebrew/bin" in result["PATH"]
@@ -316,7 +320,26 @@ class TestSanePathIncludesHomebrew:
         """When PATH already has /usr/bin, _make_run_env should not append."""
         from tools.environments.local import _make_run_env
         full_env = {"PATH": "/usr/bin:/bin"}
+        if os.name != "posix":
+            pytest.skip("POSIX PATH augmentation is not exercised on this OS")
         with patch.dict(os.environ, full_env, clear=True):
             result = _make_run_env({})
         # Should keep existing PATH unchanged
         assert result["PATH"] == "/usr/bin:/bin"
+
+
+class TestMakeRunEnvWindowsPath:
+    """PATH uses os.pathsep on POSIX; Windows must not split on ':' in drives."""
+
+    def test_windows_does_not_inject_unix_sane_path(self):
+        from tools.environments.local import _make_run_env
+
+        win_path = r"C:\Windows\System32;C:\Windows"
+        with patch("tools.environments.local._IS_WINDOWS", True), patch.dict(
+            os.environ, {"PATH": win_path}, clear=True
+        ):
+            result = _make_run_env({})
+        out = result.get("PATH", "")
+        assert "/opt/homebrew" not in out
+        assert "/usr/bin:/bin" not in out  # _SANE_PATH fragment must not appear
+        assert "System32" in out

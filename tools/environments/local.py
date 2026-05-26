@@ -3,6 +3,7 @@
 import os
 import platform
 import shutil
+from pathlib import Path
 import signal
 import subprocess
 import tempfile
@@ -198,9 +199,17 @@ def _make_run_env(env: dict) -> dict:
             run_env[real_key] = v
         elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
             run_env[k] = v
+    # _SANE_PATH is POSIX-only. Use os.name (not a test-patchable _IS_WINDOWS
+    # flag) so unit tests on Windows hosts that patch _IS_WINDOWS still split
+    # PATH with ':' — Windows native os.pathsep is ';' and would mis-handle
+    # POSIX-style test PATH values.
     existing_path = run_env.get("PATH", "")
-    if "/usr/bin" not in existing_path.split(":"):
-        run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
+    if os.name == "posix":
+        segments = [s for s in existing_path.split(os.pathsep) if s]
+        if "/usr/bin" not in segments:
+            run_env["PATH"] = (
+                f"{existing_path}{os.pathsep}{_SANE_PATH}" if existing_path else _SANE_PATH
+            )
 
     # Per-profile HOME isolation: redirect system tool configs (git, ssh, gh,
     # npm …) into {HERMES_HOME}/home/ when that directory exists.  Only the
@@ -312,14 +321,32 @@ class LocalEnvironment(BaseEnvironment):
         """Return a shell-safe writable temp dir for local execution.
 
         Termux does not provide /tmp by default, but exposes a POSIX TMPDIR.
-        Prefer POSIX-style env vars when available, keep using /tmp on regular
-        Unix systems, and only fall back to tempfile.gettempdir() when it also
-        resolves to a POSIX path.
+        On Windows, native Python and ``subprocess.Popen`` share the same path
+        rules: use ``tempfile.gettempdir()`` (or TMP/TEMP) so snapshot/cwd
+        files are readable from Python after bash writes them — do not fall
+        back to ``/tmp``, which native Windows Python often cannot open.
 
         Check the environment configured for this backend first so callers can
         override the temp root explicitly (for example via terminal.env or a
         custom TMPDIR), then fall back to the host process environment.
         """
+        if _IS_WINDOWS:
+            for env_var in ("TMPDIR", "TMP", "TEMP"):
+                raw = self.env.get(env_var) or os.environ.get(env_var)
+                if not raw or not str(raw).strip():
+                    continue
+                try:
+                    p = Path(str(raw).strip()).expanduser()
+                    if not p.is_absolute():
+                        continue
+                    resolved = p.resolve()
+                    if resolved.is_dir() and os.access(resolved, os.W_OK | os.X_OK):
+                        return str(resolved).replace("\\", "/")
+                except (OSError, ValueError):
+                    continue
+            root = Path(tempfile.gettempdir()).resolve()
+            return str(root).replace("\\", "/")
+
         for env_var in ("TMPDIR", "TMP", "TEMP"):
             candidate = self.env.get(env_var) or os.environ.get(env_var)
             if candidate and candidate.startswith("/"):

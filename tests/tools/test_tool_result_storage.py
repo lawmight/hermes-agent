@@ -1,5 +1,7 @@
 """Tests for tools/tool_result_storage.py -- 3-layer tool result persistence."""
 
+import os
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -160,7 +162,16 @@ class TestResolveStorageDir:
     def test_uses_env_temp_dir_when_available(self):
         env = MagicMock()
         env.get_temp_dir.return_value = "/data/data/com.termux/files/usr/tmp"
-        assert _resolve_storage_dir(env) == "/data/data/com.termux/files/usr/tmp/hermes-results"
+        assert _resolve_storage_dir(env).replace("\\", "/") == (
+            "/data/data/com.termux/files/usr/tmp/hermes-results"
+        )
+
+    def test_resolve_storage_dir_joins_on_windows_style_temp(self):
+        env = MagicMock()
+        env.get_temp_dir.return_value = r"C:\Users\test\AppData\Local\Temp"
+        assert _resolve_storage_dir(env) == os.path.join(
+            r"C:\Users\test\AppData\Local\Temp", "hermes-results"
+        )
 
 
 # ── _build_persisted_message ──────────────────────────────────────────
@@ -400,7 +411,10 @@ class TestMaybePersistToolResult:
             env=env,
             threshold=30_000,
         )
-        assert "/data/data/com.termux/files/usr/tmp/hermes-results/tc_termux.txt" in result
+        assert (
+            "/data/data/com.termux/files/usr/tmp/hermes-results/tc_termux.txt"
+            in result.replace("\\", "/")
+        )
         cmd = env.execute.call_args[0][0]
         assert "mkdir -p /data/data/com.termux/files/usr/tmp/hermes-results" in cmd
 

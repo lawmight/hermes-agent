@@ -9,8 +9,8 @@ Defense against context-window overflow operates at three levels:
 2. **Per-result persistence** (maybe_persist_tool_result): After a tool
    returns, if its output exceeds the tool's registered threshold
    (registry.get_max_result_size), the full output is written INTO THE
-   SANDBOX temp dir (for example /tmp/hermes-results/{tool_use_id}.txt on
-   standard Linux, or $TMPDIR/hermes-results/{tool_use_id}.txt on Termux)
+   SANDBOX temp dir (for example ``{HERMES_HOME}/tmp/hermes-results/`` or the
+   host temp dir on Windows, or ``$TMPDIR/hermes-results/`` on Termux)
    via env.execute(). The in-context content is replaced with a preview +
    file path reference. The model can read_file to access the full output
    on any backend.
@@ -24,7 +24,9 @@ Defense against context-window overflow operates at three levels:
 
 import logging
 import os
+import posixpath
 import shlex
+import tempfile
 import uuid
 
 from tools.budget_config import (
@@ -36,7 +38,19 @@ from tools.budget_config import (
 logger = logging.getLogger(__name__)
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
 PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
-STORAGE_DIR = "/tmp/hermes-results"
+
+
+def _default_storage_dir() -> str:
+    """Host-local spill dir when no execution env is available (e.g. tests)."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        return str(get_hermes_home() / "tmp" / "hermes-results")
+    except Exception:
+        return os.path.join(tempfile.gettempdir(), "hermes-results")
+
+
+STORAGE_DIR = _default_storage_dir()
 HEREDOC_MARKER = "HERMES_PERSIST_EOF"
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
 
@@ -52,8 +66,12 @@ def _resolve_storage_dir(env) -> str:
                 logger.debug("Could not resolve env temp dir: %s", exc)
             else:
                 if temp_dir:
-                    temp_dir = temp_dir.rstrip("/") or "/"
-                    return f"{temp_dir}/hermes-results"
+                    td = str(temp_dir).strip()
+                    if td.startswith("/"):
+                        root = td.rstrip("/") or "/"
+                        return posixpath.join(root, "hermes-results")
+                    root = os.path.normpath(td.rstrip("/\\"))
+                    return os.path.join(root, "hermes-results")
     return STORAGE_DIR
 
 
@@ -146,8 +164,8 @@ def maybe_persist_tool_result(
     if len(content) <= effective_threshold:
         return content
 
-    storage_dir = _resolve_storage_dir(env)
-    remote_path = f"{storage_dir}/{tool_use_id}.txt"
+    storage_dir = _resolve_storage_dir(env).replace("\\", "/")
+    remote_path = posixpath.join(storage_dir.rstrip("/"), f"{tool_use_id}.txt")
     preview, has_more = generate_preview(content, max_chars=config.preview_size)
 
     if env is not None:
