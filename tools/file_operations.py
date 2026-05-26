@@ -25,12 +25,13 @@ Usage:
     result = file_ops.search("TODO", path=".", file_glob="*.py")
 """
 
+import fnmatch
 import os
 import re
 import difflib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Iterator, Tuple
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from tools.binary_extensions import BINARY_EXTENSIONS
@@ -312,6 +313,207 @@ def normalize_search_pagination(offset: Any = DEFAULT_SEARCH_OFFSET,
     return normalized_offset, normalized_limit
 
 
+# ---------------------------------------------------------------------------
+# Stdlib search fallback (no rg/grep/find) — LocalEnvironment / host FS only
+# ---------------------------------------------------------------------------
+
+_STDLIB_SEARCH_MAX_FILE_BYTES = 256 * 1024
+_STDLIB_SEARCH_MAX_FILES_SCANNED = 80_000
+_STDLIB_SEARCH_MAX_MATCHES = 50_000
+
+
+def _search_tool_rg_grep_exits_ok(exit_code: int) -> bool:
+    """True when rg or grep completed normally: 0 = matches, 1 = no matches."""
+    return exit_code in (0, 1)
+
+
+def _stdlib_binary_sample(sample: bytes, path: str) -> bool:
+    """Return True if *sample* looks like binary (extension + byte heuristic)."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in BINARY_EXTENSIONS:
+        return True
+    if not sample:
+        return False
+    chunk = sample[:1000]
+    non_printable = sum(1 for b in chunk if b < 32 and b not in (9, 10, 13))
+    return non_printable / max(len(chunk), 1) > 0.30
+
+
+def _stdlib_walk_files(
+    root: Path, max_files: int
+) -> Tuple[Iterator[Path], Dict[str, bool]]:
+    """Walk *root* skipping hidden directories (ripgrep default). Yields file paths.
+
+    The returned *state* dict has key ``truncated`` set True if the walk
+    stopped early because ``max_files`` paths were enumerated.
+    """
+    state: Dict[str, bool] = {"truncated": False}
+
+    def gen():
+        count = 0
+        if root.is_file():
+            if count >= max_files:
+                state["truncated"] = True
+                return
+            yield root
+            return
+        if not root.is_dir():
+            return
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for fn in filenames:
+                if count >= max_files:
+                    state["truncated"] = True
+                    return
+                count += 1
+                yield Path(dirpath) / fn
+
+    return gen(), state
+
+
+def stdlib_search_files(
+    root: str, pattern: str, limit: int, offset: int
+) -> SearchResult:
+    """Find files under *root* whose basename matches *pattern* (find -name rules)."""
+    if not pattern.startswith("**/") and "/" not in pattern:
+        search_pattern = pattern
+    else:
+        search_pattern = pattern.split("/")[-1]
+
+    root_p = Path(root)
+    gen, walk_state = _stdlib_walk_files(root_p, _STDLIB_SEARCH_MAX_FILES_SCANNED)
+    hits: List[Tuple[float, str]] = []
+    for fpath in gen:
+        if not fnmatch.fnmatch(fpath.name, search_pattern):
+            continue
+        try:
+            mtime = fpath.stat().st_mtime
+        except OSError:
+            continue
+        hits.append((mtime, str(fpath)))
+
+    hits.sort(key=lambda x: -x[0])
+    paths = [h[1] for h in hits]
+    page = paths[offset : offset + limit]
+    return SearchResult(files=page, total_count=len(paths), truncated=walk_state["truncated"])
+
+
+def stdlib_search_content(
+    root: str,
+    pattern: str,
+    file_glob: Optional[str],
+    limit: int,
+    offset: int,
+    output_mode: str,
+    context: int,
+) -> SearchResult:
+    """Regex search file contents under *root* without rg/grep."""
+    try:
+        cre = re.compile(pattern)
+    except re.error as e:
+        return SearchResult(error=f"Invalid regex pattern: {e}", total_count=0)
+
+    gen, walk_state = _stdlib_walk_files(Path(root), _STDLIB_SEARCH_MAX_FILES_SCANNED)
+    matches: List[SearchMatch] = []
+    counts: Dict[str, int] = {}
+    files_only_order: List[str] = []
+    files_only_seen: set = set()
+    truncated_matches = False
+    max_collect = min(
+        _STDLIB_SEARCH_MAX_MATCHES,
+        offset + limit + (200 if context > 0 else 200),
+    )
+
+    for fpath in gen:
+        fstr = str(fpath)
+        if file_glob and not fnmatch.fnmatch(fpath.name, file_glob):
+            continue
+        try:
+            data = fpath.read_bytes()
+        except OSError:
+            continue
+        if len(data) > _STDLIB_SEARCH_MAX_FILE_BYTES:
+            data = data[:_STDLIB_SEARCH_MAX_FILE_BYTES]
+        if _stdlib_binary_sample(data[:2048], fstr):
+            continue
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        n = len(lines)
+
+        if output_mode == "count":
+            file_hits = 0
+            for i in range(n):
+                if cre.search(lines[i]):
+                    file_hits += 1
+            if file_hits:
+                counts[fstr] = file_hits
+            continue
+
+        if output_mode == "files_only":
+            for i in range(n):
+                if cre.search(lines[i]):
+                    if fstr not in files_only_seen:
+                        files_only_seen.add(fstr)
+                        files_only_order.append(fstr)
+                    break
+            continue
+
+        # content mode
+        if context <= 0:
+            for i in range(n):
+                if cre.search(lines[i]):
+                    matches.append(
+                        SearchMatch(path=fstr, line_number=i + 1, content=lines[i][:500])
+                    )
+                    if len(matches) >= max_collect:
+                        truncated_matches = True
+                        break
+            if truncated_matches:
+                break
+            continue
+
+        i = 0
+        while i < n:
+            if cre.search(lines[i]):
+                lo = max(0, i - context)
+                hi = min(n, i + context + 1)
+                for j in range(lo, hi):
+                    matches.append(
+                        SearchMatch(path=fstr, line_number=j + 1, content=lines[j][:500])
+                    )
+                    if len(matches) >= max_collect:
+                        truncated_matches = True
+                        break
+                if truncated_matches:
+                    break
+            i += 1
+        if truncated_matches:
+            break
+
+    walk_truncated = walk_state["truncated"]
+
+    if output_mode == "files_only":
+        total = len(files_only_order)
+        page = files_only_order[offset : offset + limit]
+        return SearchResult(
+            files=page,
+            total_count=total,
+            truncated=walk_truncated,
+        )
+
+    if output_mode == "count":
+        total = sum(counts.values())
+        return SearchResult(counts=counts, total_count=total, truncated=walk_truncated)
+
+    total = len(matches)
+    page = matches[offset : offset + limit]
+    return SearchResult(
+        matches=page,
+        total_count=total,
+        truncated=truncated_matches or walk_truncated or total > offset + limit,
+    )
+
+
 class ShellFileOperations(FileOperations):
     """
     File operations implemented via shell commands.
@@ -466,6 +668,29 @@ class ShellFileOperations(FileOperations):
                         return user_home + suffix
         
         return path
+
+    def _host_path_for_stdlib_search(self, path: str) -> Optional[str]:
+        """Resolve *path* on the host for Python walk-based search.
+
+        Remote sandboxes (docker, ssh, …) do not share the agent process
+        filesystem, so stdlib search is only used with LocalEnvironment.
+        """
+        from tools.environments.local import LocalEnvironment
+
+        if not isinstance(self.env, LocalEnvironment):
+            return None
+        effective_cwd = getattr(self.env, "cwd", None) or self.cwd
+        if os.path.isabs(path):
+            candidate = os.path.normpath(path)
+        else:
+            candidate = os.path.normpath(os.path.join(effective_cwd, path))
+        try:
+            resolved = str(Path(candidate).resolve(strict=False))
+        except (OSError, ValueError):
+            resolved = candidate
+        if os.path.exists(resolved):
+            return resolved
+        return None
     
     def _escape_shell_arg(self, arg: str) -> str:
         """Escape a string for safe use in shell commands."""
@@ -949,7 +1174,25 @@ class ShellFileOperations(FileOperations):
         else:
             return self._search_content(pattern, path, file_glob, limit, offset, 
                                         output_mode, context)
-    
+
+    def _stdlib_search_content_if_local(self, path: str, pattern: str,
+                                        file_glob: Optional[str], limit: int, offset: int,
+                                        output_mode: str, context: int) -> Optional[SearchResult]:
+        """Host stdlib search for LocalEnvironment only; None if not applicable."""
+        hp = self._host_path_for_stdlib_search(path)
+        if not hp:
+            return None
+        return stdlib_search_content(
+            hp, pattern, file_glob, limit, offset, output_mode, context,
+        )
+
+    def _stdlib_search_files_if_local(self, path: str, pattern: str,
+                                      limit: int, offset: int) -> Optional[SearchResult]:
+        hp = self._host_path_for_stdlib_search(path)
+        if not hp:
+            return None
+        return stdlib_search_files(hp, pattern, limit, offset)
+
     def _search_files(self, pattern: str, path: str, limit: int, offset: int) -> SearchResult:
         """Search for files by name pattern (glob-like)."""
         # Auto-prepend **/ for recursive search if not already present
@@ -962,28 +1205,50 @@ class ShellFileOperations(FileOperations):
         # default, and has parallel directory traversal (~200x faster than
         # find on wide trees).  Mirrors _search_content which already uses rg.
         if self._has_command('rg'):
-            return self._search_files_rg(search_pattern, path, limit, offset)
+            res, ex = self._search_files_rg(search_pattern, path, limit, offset)
+            if _search_tool_rg_grep_exits_ok(ex):
+                return res
+            std = self._stdlib_search_files_if_local(path, pattern, limit, offset)
+            if std is not None:
+                return std
+            if self._has_command('find'):
+                return self._search_files_find(search_pattern, path, limit, offset)
+            return res
 
         # Fallback: find (slower, no .gitignore awareness)
         if not self._has_command('find'):
+            std = self._stdlib_search_files_if_local(path, pattern, limit, offset)
+            if std is not None:
+                return std
             return SearchResult(
-                error="File search requires 'rg' (ripgrep) or 'find'. "
-                      "Install ripgrep for best results: "
+                error="File search requires 'rg' (ripgrep), 'find', or a local "
+                      "terminal with Python-based fallback. "
+                      "Install ripgrep: "
                       "https://github.com/BurntSushi/ripgrep#installation"
             )
 
+        return self._search_files_find(search_pattern, path, limit, offset)
+
+    def _search_files_find(self, search_pattern: str, path: str, limit: int, offset: int) -> SearchResult:
+        """Search by filename using find (excluding hidden dirs)."""
         # Exclude hidden directories (matching ripgrep's default behavior).
         hidden_exclude = "-not -path '*/.*'"
 
-        cmd = f"find {self._escape_shell_arg(path)} {hidden_exclude} -type f -name {self._escape_shell_arg(search_pattern)} " \
-              f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn | tail -n +{offset + 1} | head -n {limit}"
+        cmd = (
+            f"set -o pipefail; "
+            f"find {self._escape_shell_arg(path)} {hidden_exclude} -type f -name {self._escape_shell_arg(search_pattern)} "
+            f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn | tail -n +{offset + 1} | head -n {limit}"
+        )
 
         result = self._exec(cmd, timeout=60)
 
         if not result.stdout.strip():
             # Try without -printf (BSD find compatibility -- macOS)
-            cmd_simple = f"find {self._escape_shell_arg(path)} {hidden_exclude} -type f -name {self._escape_shell_arg(search_pattern)} " \
-                        f"2>/dev/null | head -n {limit + offset} | tail -n +{offset + 1}"
+            cmd_simple = (
+                f"set -o pipefail; "
+                f"find {self._escape_shell_arg(path)} {hidden_exclude} -type f -name {self._escape_shell_arg(search_pattern)} "
+                f"2>/dev/null | head -n {limit + offset} | tail -n +{offset + 1}"
+            )
             result = self._exec(cmd_simple, timeout=60)
 
         files = []
@@ -1001,13 +1266,17 @@ class ShellFileOperations(FileOperations):
             total_count=len(files)
         )
 
-    def _search_files_rg(self, pattern: str, path: str, limit: int, offset: int) -> SearchResult:
+    def _search_files_rg(self, pattern: str, path: str, limit: int, offset: int) -> tuple[SearchResult, int]:
         """Search for files by name using ripgrep's --files mode.
 
         rg --files respects .gitignore and excludes hidden directories by
         default, and uses parallel directory traversal for ~200x speedup
         over find on wide trees.  Results are sorted by modification time
         (most recently edited first) when rg >= 13.0 supports --sortr.
+
+        Returns (result, exit_code of the rg pipeline that was used).  Uses
+        ``set -o pipefail`` so a broken ``rg`` (e.g. exit 126) is not masked
+        by ``head`` exiting 0.
         """
         # rg --files -g uses glob patterns; wrap bare names so they match
         # at any depth (equivalent to find -name).
@@ -1019,51 +1288,87 @@ class ShellFileOperations(FileOperations):
         fetch_limit = limit + offset
         # Try mtime-sorted first (rg 13+); fall back to unsorted if not supported.
         cmd_sorted = (
+            f"set -o pipefail; "
             f"rg --files --sortr=modified -g {self._escape_shell_arg(glob_pattern)} "
             f"{self._escape_shell_arg(path)} 2>/dev/null "
             f"| head -n {fetch_limit}"
         )
-        result = self._exec(cmd_sorted, timeout=60)
-        all_files = [f for f in result.stdout.strip().split('\n') if f]
+        r_sort = self._exec(cmd_sorted, timeout=60)
+        all_files = [f for f in r_sort.stdout.strip().split('\n') if f]
+        r_last = r_sort
 
         if not all_files:
-            # --sortr may have failed on older rg; retry without it.
+            # --sortr may have failed on older rg, or there may be no files.
             cmd_plain = (
+                f"set -o pipefail; "
                 f"rg --files -g {self._escape_shell_arg(glob_pattern)} "
                 f"{self._escape_shell_arg(path)} 2>/dev/null "
                 f"| head -n {fetch_limit}"
             )
-            result = self._exec(cmd_plain, timeout=60)
-            all_files = [f for f in result.stdout.strip().split('\n') if f]
+            r_plain = self._exec(cmd_plain, timeout=60)
+            r_last = r_plain
+            all_files = [f for f in r_plain.stdout.strip().split('\n') if f]
 
         page = all_files[offset:offset + limit]
 
-        return SearchResult(
-            files=page,
-            total_count=len(all_files),
-            truncated=len(all_files) >= fetch_limit,
+        return (
+            SearchResult(
+                files=page,
+                total_count=len(all_files),
+                truncated=len(all_files) >= fetch_limit,
+            ),
+            r_last.exit_code,
         )
     
     def _search_content(self, pattern: str, path: str, file_glob: Optional[str],
                         limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
         """Search for content inside files (grep-like)."""
-        # Try ripgrep first (fast), fallback to grep (slower but works)
         if self._has_command('rg'):
-            return self._search_with_rg(pattern, path, file_glob, limit, offset, 
-                                        output_mode, context)
-        elif self._has_command('grep'):
-            return self._search_with_grep(pattern, path, file_glob, limit, offset,
-                                          output_mode, context)
-        else:
-            # Neither rg nor grep available (Windows without Git Bash, etc.)
-            return SearchResult(
-                error="Content search requires ripgrep (rg) or grep. "
-                      "Install ripgrep: https://github.com/BurntSushi/ripgrep#installation"
+            res, ex = self._search_with_rg(
+                pattern, path, file_glob, limit, offset, output_mode, context,
             )
+            if _search_tool_rg_grep_exits_ok(ex):
+                return res
+            std = self._stdlib_search_content_if_local(
+                path, pattern, file_glob, limit, offset, output_mode, context,
+            )
+            if std is not None:
+                return std
+            if self._has_command('grep'):
+                gres, gex = self._search_with_grep(
+                    pattern, path, file_glob, limit, offset, output_mode, context,
+                )
+                if _search_tool_rg_grep_exits_ok(gex):
+                    return gres
+                return gres
+            return res
+        if self._has_command('grep'):
+            res, ex = self._search_with_grep(
+                pattern, path, file_glob, limit, offset, output_mode, context,
+            )
+            if _search_tool_rg_grep_exits_ok(ex):
+                return res
+            std = self._stdlib_search_content_if_local(
+                path, pattern, file_glob, limit, offset, output_mode, context,
+            )
+            if std is not None:
+                return std
+            return res
+        std = self._stdlib_search_content_if_local(
+            path, pattern, file_glob, limit, offset, output_mode, context,
+        )
+        if std is not None:
+            return std
+        return SearchResult(
+            error="Content search requires ripgrep (rg), grep, or a local "
+                  "terminal for Python-based search. "
+                  "Install ripgrep: https://github.com/BurntSushi/ripgrep#installation"
+        )
     
     def _search_with_rg(self, pattern: str, path: str, file_glob: Optional[str],
-                        limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
-        """Search using ripgrep."""
+                        limit: int, offset: int, output_mode: str, context: int) -> tuple[SearchResult, int]:
+        """Search using ripgrep.  Returns (result, exit_code); uses ``pipefail`` so a
+        broken ``rg`` (e.g. exit 126) is not masked by ``head`` exiting 0."""
         cmd_parts = ["rg", "--line-number", "--no-heading", "--with-filename"]
         
         # Add context if requested
@@ -1090,22 +1395,18 @@ class ShellFileOperations(FileOperations):
         fetch_limit = limit + offset + 200 if context > 0 else limit + offset
         cmd_parts.extend(["|", "head", "-n", str(fetch_limit)])
         
-        cmd = " ".join(cmd_parts)
+        cmd = "set -o pipefail; " + " ".join(cmd_parts)
         result = self._exec(cmd, timeout=60)
-        
-        # rg exit codes: 0=matches found, 1=no matches, 2=error
-        if result.exit_code == 2 and not result.stdout.strip():
-            error_msg = result.stderr.strip() if hasattr(result, 'stderr') and result.stderr else "Search error"
-            return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
+        ex = result.exit_code
         
         # Parse results based on output mode
         if output_mode == "files_only":
             all_files = [f for f in result.stdout.strip().split('\n') if f]
             total = len(all_files)
             page = all_files[offset:offset + limit]
-            return SearchResult(files=page, total_count=total)
+            return SearchResult(files=page, total_count=total), ex
         
-        elif output_mode == "count":
+        if output_mode == "count":
             counts = {}
             for line in result.stdout.strip().split('\n'):
                 if ':' in line:
@@ -1115,54 +1416,50 @@ class ShellFileOperations(FileOperations):
                             counts[parts[0]] = int(parts[1])
                         except ValueError:
                             pass
-            return SearchResult(counts=counts, total_count=sum(counts.values()))
-        
-        else:
-            # Parse content matches and context lines.
-            # rg match lines:   "file:lineno:content"  (colon separator)
-            # rg context lines: "file-lineno-content"   (dash separator)
-            # rg group seps:    "--"
-            # Note: on Windows, paths contain drive letters (e.g. C:\path),
-            # so naive split(":") breaks. Use regex to handle both platforms.
-            _match_re = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
-            _ctx_re = re.compile(r'^([A-Za-z]:)?(.*?)-(\d+)-(.*)$')
-            matches = []
-            for line in result.stdout.strip().split('\n'):
-                if not line or line == "--":
-                    continue
-                
-                # Try match line first (colon-separated: file:line:content)
-                m = _match_re.match(line)
+            return SearchResult(counts=counts, total_count=sum(counts.values())), ex
+
+        # Parse content matches and context lines.
+        # rg match lines:   "file:lineno:content"  (colon separator)
+        # rg context lines: "file-lineno-content"   (dash separator)
+        # rg group seps:    "--"
+        # Note: on Windows, paths contain drive letters (e.g. C:\path),
+        # so naive split(":") breaks. Use regex to handle both platforms.
+        _match_re = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
+        _ctx_re = re.compile(r'^([A-Za-z]:)?(.*?)-(\d+)-(.*)$')
+        matches = []
+        for line in result.stdout.strip().split('\n'):
+            if not line or line == "--":
+                continue
+
+            m = _match_re.match(line)
+            if m:
+                matches.append(SearchMatch(
+                    path=(m.group(1) or '') + m.group(2),
+                    line_number=int(m.group(3)),
+                    content=m.group(4)[:500]
+                ))
+                continue
+
+            if context > 0:
+                m = _ctx_re.match(line)
                 if m:
                     matches.append(SearchMatch(
                         path=(m.group(1) or '') + m.group(2),
                         line_number=int(m.group(3)),
                         content=m.group(4)[:500]
                     ))
-                    continue
-                
-                # Try context line (dash-separated: file-line-content)
-                # Only attempt if context was requested to avoid false positives
-                if context > 0:
-                    m = _ctx_re.match(line)
-                    if m:
-                        matches.append(SearchMatch(
-                            path=(m.group(1) or '') + m.group(2),
-                            line_number=int(m.group(3)),
-                            content=m.group(4)[:500]
-                        ))
-            
-            total = len(matches)
-            page = matches[offset:offset + limit]
-            return SearchResult(
-                matches=page,
-                total_count=total,
-                truncated=total > offset + limit
-            )
-    
+
+        total = len(matches)
+        page = matches[offset:offset + limit]
+        return SearchResult(
+            matches=page,
+            total_count=total,
+            truncated=total > offset + limit
+        ), ex
+
     def _search_with_grep(self, pattern: str, path: str, file_glob: Optional[str],
-                          limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
-        """Fallback search using grep."""
+                          limit: int, offset: int, output_mode: str, context: int) -> tuple[SearchResult, int]:
+        """Fallback search using grep.  Returns (result, exit_code)."""
         cmd_parts = ["grep", "-rnH"]  # -H forces filename even for single-file searches
         
         # Exclude hidden directories (matching ripgrep's default behavior).
@@ -1191,21 +1488,17 @@ class ShellFileOperations(FileOperations):
         fetch_limit = limit + offset + (200 if context > 0 else 0)
         cmd_parts.extend(["|", "head", "-n", str(fetch_limit)])
         
-        cmd = " ".join(cmd_parts)
+        cmd = "set -o pipefail; " + " ".join(cmd_parts)
         result = self._exec(cmd, timeout=60)
-        
-        # grep exit codes: 0=matches found, 1=no matches, 2=error
-        if result.exit_code == 2 and not result.stdout.strip():
-            error_msg = result.stderr.strip() if hasattr(result, 'stderr') and result.stderr else "Search error"
-            return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
+        ex = result.exit_code
         
         if output_mode == "files_only":
             all_files = [f for f in result.stdout.strip().split('\n') if f]
             total = len(all_files)
             page = all_files[offset:offset + limit]
-            return SearchResult(files=page, total_count=total)
+            return SearchResult(files=page, total_count=total), ex
         
-        elif output_mode == "count":
+        if output_mode == "count":
             counts = {}
             for line in result.stdout.strip().split('\n'):
                 if ':' in line:
@@ -1215,44 +1508,42 @@ class ShellFileOperations(FileOperations):
                             counts[parts[0]] = int(parts[1])
                         except ValueError:
                             pass
-            return SearchResult(counts=counts, total_count=sum(counts.values()))
-        
-        else:
-            # grep match lines:   "file:lineno:content" (colon)
-            # grep context lines: "file-lineno-content"  (dash)
-            # grep group seps:    "--"
-            # Note: on Windows, paths contain drive letters (e.g. C:\path),
-            # so naive split(":") breaks. Use regex to handle both platforms.
-            _match_re = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
-            _ctx_re = re.compile(r'^([A-Za-z]:)?(.*?)-(\d+)-(.*)$')
-            matches = []
-            for line in result.stdout.strip().split('\n'):
-                if not line or line == "--":
-                    continue
-                
-                m = _match_re.match(line)
+            return SearchResult(counts=counts, total_count=sum(counts.values())), ex
+
+        # grep match lines:   "file:lineno:content" (colon)
+        # grep context lines: "file-lineno-content"  (dash)
+        # grep group seps:    "--"
+        # Note: on Windows, paths contain drive letters (e.g. C:\path),
+        # so naive split(":") breaks. Use regex to handle both platforms.
+        _match_re = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
+        _ctx_re = re.compile(r'^([A-Za-z]:)?(.*?)-(\d+)-(.*)$')
+        matches = []
+        for line in result.stdout.strip().split('\n'):
+            if not line or line == "--":
+                continue
+            
+            m = _match_re.match(line)
+            if m:
+                matches.append(SearchMatch(
+                    path=(m.group(1) or '') + m.group(2),
+                    line_number=int(m.group(3)),
+                    content=m.group(4)[:500]
+                ))
+                continue
+            
+            if context > 0:
+                m = _ctx_re.match(line)
                 if m:
                     matches.append(SearchMatch(
                         path=(m.group(1) or '') + m.group(2),
                         line_number=int(m.group(3)),
                         content=m.group(4)[:500]
                     ))
-                    continue
-                
-                if context > 0:
-                    m = _ctx_re.match(line)
-                    if m:
-                        matches.append(SearchMatch(
-                            path=(m.group(1) or '') + m.group(2),
-                            line_number=int(m.group(3)),
-                            content=m.group(4)[:500]
-                        ))
 
-            
-            total = len(matches)
-            page = matches[offset:offset + limit]
-            return SearchResult(
-                matches=page,
-                total_count=total,
-                truncated=total > offset + limit
-            )
+        total = len(matches)
+        page = matches[offset:offset + limit]
+        return SearchResult(
+            matches=page,
+            total_count=total,
+            truncated=total > offset + limit
+        ), ex

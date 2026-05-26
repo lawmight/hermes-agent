@@ -319,21 +319,21 @@ class TestSearchPathValidation:
         assert result.total_count == 0  # No matches but no error
 
     def test_search_rg_error_exit_code(self, mock_env):
-        """search() should report error when rg returns exit code 2."""
-        call_count = {"n": 0}
+        """When rg fails (exit 2) on a non-local env, search returns empty without stdlib."""
         def side_effect(command, **kwargs):
-            call_count["n"] += 1
             if "test -e" in command:
                 return {"output": "exists", "returncode": 0}
-            if "command -v" in command:
+            if "command -v rg" in command:
                 return {"output": "yes", "returncode": 0}
-            # rg returns exit 2 (error) with empty output
+            if "command -v grep" in command:
+                return {"output": "", "returncode": 1}
+            # rg (and any other search) returns exit 2 with empty output
             return {"output": "", "returncode": 2}
         mock_env.execute.side_effect = side_effect
         ops = ShellFileOperations(mock_env)
         result = ops.search("pattern", path="/some/path")
-        assert result.error is not None
-        assert "search failed" in result.error.lower() or "Search error" in result.error
+        assert result.error is None
+        assert result.total_count == 0
 
 
 class TestShellFileOpsWriteDenied:
