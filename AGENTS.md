@@ -762,3 +762,8 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+## Learned (continual learning)
+
+- On **Windows**, when creating folders under the user Hermes home from copy-paste snippets, use **`%USERPROFILE%\.hermes\...`** in **cmd** and **`$env:USERPROFILE\.hermes\...`** (or `Join-Path`) in **PowerShell**. Using PowerShell-style `$env:` variables in cmd creates a literal bad path (Windows rejects the folder name).
+- **Cursor:** running **`hermes` from Cursor’s integrated terminal** is the same as any local shell workflow (activate the repo `.venv`, then invoke `hermes`). **ACP** (`hermes acp`) is documented for VS Code, Zed, and JetBrains; treat **Cursor + ACP** as try-and-verify unless your ACP client explicitly supports Cursor.
