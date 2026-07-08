@@ -25,6 +25,7 @@ Usage:
     result = file_ops.search("TODO", path=".", file_glob="*.py")
 """
 
+import fnmatch
 import os
 import re
 import difflib
