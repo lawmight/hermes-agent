@@ -22,9 +22,11 @@ Defense against context-window overflow operates at three levels:
    where many medium-sized results combine to overflow context.
 """
 
+import hashlib
 import logging
 import os
 import posixpath
+import re
 import shlex
 import tempfile
 import uuid
@@ -38,8 +40,6 @@ from tools.budget_config import (
 logger = logging.getLogger(__name__)
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
 PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
-
-
 def _default_storage_dir() -> str:
     """Host-local spill dir when no execution env is available (e.g. tests)."""
     try:
@@ -53,6 +53,8 @@ def _default_storage_dir() -> str:
 STORAGE_DIR = _default_storage_dir()
 HEREDOC_MARKER = "HERMES_PERSIST_EOF"
 _BUDGET_TOOL_NAME = "__budget_enforcement__"
+_UNSAFE_RESULT_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+_MAX_RESULT_FILENAME_STEM = 120
 
 
 def _resolve_storage_dir(env) -> str:
@@ -73,6 +75,24 @@ def _resolve_storage_dir(env) -> str:
                     root = os.path.normpath(td.rstrip("/\\"))
                     return os.path.join(root, "hermes-results")
     return STORAGE_DIR
+
+
+def _safe_result_filename(tool_use_id: str) -> str:
+    """Return a single safe filename for a tool result id."""
+    raw_id = str(tool_use_id or "tool_result")
+    safe_stem = _UNSAFE_RESULT_FILENAME_CHARS.sub("_", raw_id).strip("._-")
+    changed = safe_stem != raw_id
+
+    if not safe_stem:
+        safe_stem = "tool_result"
+        changed = True
+
+    if changed or len(safe_stem) > _MAX_RESULT_FILENAME_STEM:
+        digest = hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:12]
+        safe_stem = safe_stem[:_MAX_RESULT_FILENAME_STEM].rstrip("._-") or "tool_result"
+        safe_stem = f"{safe_stem}_{digest}"
+
+    return f"{safe_stem}.txt"
 
 
 def generate_preview(content: str, max_chars: int = DEFAULT_PREVIEW_SIZE_CHARS) -> tuple[str, bool]:
@@ -171,7 +191,7 @@ def maybe_persist_tool_result(
         return content
 
     storage_dir = _resolve_storage_dir(env).replace("\\", "/")
-    remote_path = posixpath.join(storage_dir.rstrip("/"), f"{tool_use_id}.txt")
+    remote_path = f"{storage_dir.rstrip('/')}/{_safe_result_filename(tool_use_id)}"
     preview, has_more = generate_preview(content, max_chars=config.preview_size)
 
     if env is not None:

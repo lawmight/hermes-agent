@@ -8,17 +8,23 @@ Every test with output validates against a known-good value AND
 asserts zero contamination from shell noise via _assert_clean().
 """
 
-import json
+import pytest
+
+
+
+
 import os
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools.environments.local import LocalEnvironment
+from tools.file_operations import ShellFileOperations
 
-# _has_command uses POSIX `command -v` in bash and expects a fixed stdout
+
+# `_has_command` uses POSIX `command -v` in bash and expects a fixed stdout
 # contract; on Windows, `find` also refers to a different program than GNU
 # find. CI exercises these on Linux and macOS.
 skip_posix_path_tool_probe = pytest.mark.skipif(
@@ -28,9 +34,6 @@ skip_posix_path_tool_probe = pytest.mark.skipif(
         "not required on win32; enforced on Linux/mac in CI"
     ),
 )
-
-from tools.environments.local import LocalEnvironment
-from tools.file_operations import ShellFileOperations
 
 
 # ── Shared noise detection ───────────────────────────────────────────────
@@ -405,7 +408,6 @@ class TestExpandPath:
         # The path should be returned as-is (no expansion).
         assert result == malicious
         # Verify the injected command did NOT execute
-        import os
         assert not os.path.exists("/tmp/_hermes_injection_test")
 
     def test_tilde_username_with_subpath(self, ops):
