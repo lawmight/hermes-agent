@@ -248,6 +248,16 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "copilot-acp": [
         "copilot-acp",
     ],
+    # Cursor — curated fallback only. The live /v1/models catalog (fetched via
+    # the CursorProfile) is the authoritative source and merges live-first
+    # (see _LIVE_FIRST_PICKER_PROVIDERS); Cursor documents it as a
+    # "recommended subset", and the API accepts other model keys too.
+    "cursor": [
+        "composer-2.5",
+        "composer-2",
+        "claude-4.6-sonnet-thinking",
+        "gpt-5.3-codex-high",
+    ],
     "copilot": [
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -1821,7 +1831,7 @@ _BORROWED_MODEL_PROVIDERS: frozenset[str] = frozenset()
 # Zen / Go re-expose dozens of upstream vendors and rotate them frequently, so
 # their stale curated entries must not pollute the top of the picker. (#49129)
 _LIVE_FIRST_PICKER_PROVIDERS: frozenset[str] = frozenset(
-    {"opencode-zen", "opencode-go"}
+    {"opencode-zen", "opencode-go", "cursor"}
 )
 
 

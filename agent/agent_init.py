@@ -420,8 +420,12 @@ def init_agent(
     agent.provider = provider_name or ""
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
-    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}:
+    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server", "cursor_agent"}:
         agent.api_mode = api_mode
+    elif agent.provider == "cursor":
+        # Cursor has no chat-completions surface — turns always run through
+        # the cursor-sdk agent runtime (see agent/cursor_runtime.py).
+        agent.api_mode = "cursor_agent"
     elif agent.provider == "openai-codex":
         agent.api_mode = "codex_responses"
     elif agent.provider in {"xai", "xai-oauth"}:
