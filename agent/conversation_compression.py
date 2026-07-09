@@ -480,6 +480,22 @@ def compress_context(
             force=force,
         )
 
+    # Cursor runtime sessions: the cursor agent owns its real conversation
+    # context server/bridge-side and manages its own window (it self-compacts
+    # and emits SummaryUpdate events). There is no externally-triggerable
+    # compaction in the SDK, so Hermes' summarizer must never rewrite the
+    # projected transcript — it would desync the local mirror from cursor's
+    # actual thread without shrinking anything (same class of bug as #36801
+    # on the codex runtime). Always a no-op here; ``compression.cursor_auto``
+    # documents the posture (native = trust cursor; off = same, minus logs).
+    if getattr(agent, "api_mode", None) == "cursor_agent":
+        if str(getattr(agent, "cursor_auto_compaction", "native")) != "off":
+            logger.info(
+                "cursor runtime: skipping Hermes compression — the cursor "
+                "agent manages its own context window natively"
+            )
+        return messages, system_message
+
     # Lazy feasibility check — run the auxiliary-provider probe + context
     # length lookup just-in-time on the first compression attempt instead of
     # at AIAgent.__init__. Saves ~400ms cold off every short session that

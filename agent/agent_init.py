@@ -866,6 +866,28 @@ def init_agent(
         agent.base_url = "moa://local"
         if not agent.quiet_mode:
             print(f"🤖 AI Agent initialized with MoA preset: {agent.model}")
+    elif agent.api_mode == "cursor_agent":
+        # Cursor agent runtime — turns are driven through the official
+        # cursor-sdk (see agent/cursor_runtime.py); there is no
+        # OpenAI-compatible client to build. The API key is the plain
+        # CURSOR_API_KEY (dashboard → Integrations); the CursorSDKSession
+        # passes it explicitly to the SDK bridge.
+        _cursor_key = (api_key or "").strip() if isinstance(api_key, str) else (api_key or "")
+        if not _cursor_key:
+            _cursor_key = os.getenv("CURSOR_API_KEY", "").strip()
+        if not _cursor_key:
+            raise RuntimeError(
+                "Provider 'cursor' requires a Cursor API key. Set "
+                "CURSOR_API_KEY in your .env (create one at Cursor "
+                "Dashboard → Integrations), or switch providers with "
+                "`hermes model`."
+            )
+        agent.api_key = _cursor_key
+        agent.base_url = (base_url or "").strip() or "https://api.cursor.com"
+        agent.client = None
+        agent._client_kwargs = {}
+        if not agent.quiet_mode:
+            print(f"🤖 AI Agent initialized with model: {agent.model} (Cursor agent runtime)")
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
         # Region is extracted from the base_url or defaults to us-east-1.
@@ -1584,6 +1606,16 @@ def init_agent(
             codex_app_server_auto_compaction,
         )
         codex_app_server_auto_compaction = "native"
+    cursor_auto_compaction = str(
+        _compression_cfg.get("cursor_auto", "native") or "native"
+    ).lower()
+    if cursor_auto_compaction not in {"native", "off"}:
+        _ra().logger.warning(
+            "Invalid compression.cursor_auto=%r; using 'native'. "
+            "Valid values are: native, off.",
+            cursor_auto_compaction,
+        )
+        cursor_auto_compaction = "native"
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -1839,6 +1871,7 @@ def init_agent(
     agent.compression_enabled = compression_enabled
     agent.compression_in_place = compression_in_place
     agent.codex_app_server_auto_compaction = codex_app_server_auto_compaction
+    agent.cursor_auto_compaction = cursor_auto_compaction
 
     # Reject models whose context window is below the minimum required
     # for reliable tool-calling workflows (64K tokens).

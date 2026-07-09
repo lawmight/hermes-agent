@@ -56,6 +56,15 @@ def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
     parent_api_mode = parent_runtime.get("api_mode") or None
     if parent_api_mode == "codex_app_server":
         parent_api_mode = "codex_responses"
+    # The cursor runtime has NO raw chat-completions surface to downgrade to
+    # (unlike codex_app_server → codex_responses), and the review fork works
+    # by replaying the parent transcript as conversation_history — which the
+    # cursor agent runtime cannot ingest (cursor keeps its own server-side
+    # context and only receives the newest user message). Inheriting the
+    # parent runtime would produce a review with no transcript context, so
+    # the fork must either be routed to an explicitly configured
+    # auxiliary.background_review model or skipped.
+    cursor_parent = parent_api_mode == "cursor_agent"
     parent = {
         "provider": agent.provider,
         "model": agent.model,
@@ -64,11 +73,21 @@ def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
         "api_mode": parent_api_mode,
         "routed": False,
     }
+    _cursor_skip = {
+        **parent,
+        "skip": True,
+        "skip_reason": (
+            "background review cannot inherit the cursor agent runtime "
+            "(no chat-completions surface / no transcript replay). Set "
+            "auxiliary.background_review.{provider,model} in config.yaml "
+            "to run reviews on another provider."
+        ),
+    }
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
     except Exception:
-        return parent
+        return _cursor_skip if cursor_parent else parent
     aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
     task = aux.get("background_review", {}) if isinstance(aux.get("background_review"), dict) else {}
     task_provider = (str(task.get("provider", "")).strip() or None)
@@ -76,9 +95,10 @@ def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
     task_base_url = (str(task.get("base_url", "")).strip() or None)
     task_api_key = (str(task.get("api_key", "")).strip() or None)
     if not (task_provider and task_provider != "auto" and task_model):
-        return parent
+        return _cursor_skip if cursor_parent else parent
     if task_provider == (agent.provider or "") and task_model == (agent.model or ""):
-        return parent  # same model/provider as parent -> not routed
+        # same model/provider as parent -> not routed
+        return _cursor_skip if cursor_parent else parent
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         rp = resolve_runtime_provider(
@@ -97,7 +117,7 @@ def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.debug("background-review aux routing failed (%s); using main model", e)
-        return parent
+        return _cursor_skip if cursor_parent else parent
 
 
 def _msg_text(m: Dict) -> str:
@@ -661,6 +681,12 @@ def _run_review_in_thread(
             # model — that model's runtime (routed=True). The codex_app_server
             # -> codex_responses downgrade is applied inside the resolver.
             _rt = _resolve_review_runtime(agent)
+            if _rt.get("skip"):
+                logger.info(
+                    "Background review skipped: %s",
+                    _rt.get("skip_reason") or "runtime cannot host the review fork",
+                )
+                return
             _routed = bool(_rt.get("routed"))
             # skip_memory=True keeps the review fork from
             # touching external memory plugins (honcho, mem0,
