@@ -264,10 +264,12 @@ class TestEnsureStarted:
         assert kwargs["model"] == {
             "id": "composer-2.5", "params": [{"id": "fast", "value": "true"}],
         }
-        assert kwargs["mode"] == "plan"
         assert kwargs["api_key"] == "crsr_test"
         assert kwargs["name"] == "My session"
-        assert kwargs["agents"] == {
+        # mode/agents are AgentOptions fields — must ride in ``options``,
+        # not as top-level create() kwargs (SDK 0.1.9 rejects those).
+        assert kwargs["options"]["mode"] == "plan"
+        assert kwargs["options"]["agents"] == {
             "reviewer": {"description": "reviews", "prompt": "review it"},
         }
         local = kwargs["local"]
@@ -318,7 +320,9 @@ class TestEnsureStarted:
         session._hermes_mcp_servers = {"fs": {"command": "npx"}}
         session.ensure_started()
         kwargs = session._client.agents.create_kwargs[0]
-        assert kwargs["mcp_servers"] == {"fs": {"type": "stdio", "command": "npx"}}
+        assert kwargs["options"]["mcp_servers"] == {
+            "fs": {"type": "stdio", "command": "npx"},
+        }
 
     def test_env_kwarg_fallback_when_unsupported(self):
         sdk = make_fake_sdk()

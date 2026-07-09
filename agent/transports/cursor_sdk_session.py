@@ -423,26 +423,38 @@ class CursorSDKSession:
         return client_cls.launch_bridge(workspace=self._cwd)
 
     def _build_create_kwargs(self) -> dict[str, Any]:
+        # cursor-sdk 0.1.9 ``agents.create`` only accepts top-level
+        # model/api_key/name/local/cloud/idempotency_key. Everything else
+        # (mode, agents, mcp_servers, …) lives on the ``options`` mapping
+        # (AgentOptions). Passing ``mode=`` as a top-level kwarg raises
+        # TypeError: unexpected keyword argument 'mode'.
         model_selection = build_model_selection(
             self._model, self._config.get("model_params")
         )
         kwargs: dict[str, Any] = {
             "model": model_selection,
-            "mode": self.mode,
         }
         if self._api_key:
             kwargs["api_key"] = self._api_key
         if self._session_title:
             kwargs["name"] = str(self._session_title)[:120]
 
+        options: dict[str, Any] = {}
+        mode = self.mode
+        if mode in {"agent", "plan"}:
+            options["mode"] = mode
+
         subagents = _clean_subagent_definitions(self._config.get("agents"))
         if subagents:
-            kwargs["agents"] = subagents
+            options["agents"] = subagents
 
         if self._config.get("inherit_mcp"):
             mcp = translate_hermes_mcp_servers(self._hermes_mcp_servers)
             if mcp:
-                kwargs["mcp_servers"] = mcp
+                options["mcp_servers"] = mcp
+
+        if options:
+            kwargs["options"] = options
 
         if self.runtime == "cloud":
             kwargs["cloud"] = self._build_cloud_options()
