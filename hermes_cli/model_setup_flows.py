@@ -2653,7 +2653,7 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         if chosen_base and chosen_base != effective_base and base_url_env:
             save_env_value(base_url_env, chosen_base)
         effective_base = chosen_base
-    else:
+    elif base_url_env:
         try:
             override = input(f"Base URL [{effective_base}]: ").strip()
         except (KeyboardInterrupt, EOFError):
@@ -2667,6 +2667,10 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
             else:
                 save_env_value(base_url_env, override)
                 effective_base = override
+    elif effective_base:
+        # Fixed-endpoint providers (e.g. cursor agent harness) have no
+        # *_BASE_URL env var — prompting would be a no-op anyway.
+        print(f"  Endpoint: {effective_base}")
 
     # Model selection — resolution order:
     #   1. models.dev registry (cached, filtered for agentic/tool-capable models)
@@ -2690,6 +2694,12 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
             model_list = []
         if model_list:
             print(f"  Found {len(model_list)} model(s) from LM Studio")
+    elif provider_id == "cursor":
+        from hermes_cli.models import provider_model_ids
+
+        model_list = provider_model_ids("cursor", force_refresh=True)
+        if model_list:
+            print(f"  Found {len(model_list)} model(s) from Cursor API")
     elif provider_id == "ollama-cloud":
         from hermes_cli.models import fetch_ollama_cloud_models
 

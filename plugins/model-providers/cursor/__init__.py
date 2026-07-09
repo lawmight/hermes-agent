@@ -83,7 +83,15 @@ class CursorProfile(ProviderProfile):
             logger.debug("fetch_models(cursor): %s", exc)
             return None
 
-        raw_models = data.get("models") if isinstance(data, dict) else None
+        # Current Cloud Agents API returns {"items": [...]}; legacy shapes used
+        # {"models": [...]} (v1 objects or v0 bare id strings).
+        raw_models = None
+        if isinstance(data, dict):
+            for key in ("items", "models"):
+                candidate = data.get(key)
+                if isinstance(candidate, list):
+                    raw_models = candidate
+                    break
         if not isinstance(raw_models, list):
             return None
 
@@ -117,7 +125,7 @@ cursor = CursorProfile(
     base_url=CURSOR_API_BASE_URL,
     auth_type="api_key",
     display_name="Cursor",
-    description="Cursor (Composer + frontier models via Cursor subscription, official SDK)",
+    description="Cursor (First-party + API models via Cursor subscription, official SDK)",
     signup_url="https://cursor.com/dashboard?tab=integrations",
     # No OpenAI-compat /models endpoint on the inference path — the catalog
     # probe above uses the Cloud Agents REST API instead, and `hermes doctor`

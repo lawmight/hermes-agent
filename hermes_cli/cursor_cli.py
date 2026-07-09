@@ -153,7 +153,13 @@ def cmd_models(args) -> int:
         data = _rest_get("/v1/models", api_key)
     except Exception as exc:
         return _fail(f"model catalog fetch failed: {exc}")
-    models = data.get("models") if isinstance(data, dict) else None
+    models = None
+    if isinstance(data, dict):
+        for key in ("items", "models"):
+            candidate = data.get(key)
+            if isinstance(candidate, list) and candidate:
+                models = candidate
+                break
     if not isinstance(models, list) or not models:
         return _fail("no models returned (check your API key)")
     print(f"Cursor models ({len(models)} recommended — other ids may also work):")

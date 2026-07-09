@@ -140,6 +140,21 @@ class TestModelCatalogFetch:
             ids = profile.fetch_models(api_key="k")
         assert ids == ["composer-2.5", "gpt-5.3-codex-high"]
 
+    def test_fetch_models_parses_items_shape(self):
+        from providers import get_provider_profile
+
+        profile = get_provider_profile("cursor")
+        payload = {"items": [
+            {"id": "composer-2.5", "displayName": "Composer 2.5"},
+            {"id": "grok-4.5"},
+        ]}
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self._Response(json.dumps(payload).encode()),
+        ):
+            ids = profile.fetch_models(api_key="k")
+        assert ids == ["composer-2.5", "grok-4.5"]
+
     def test_fetch_models_tolerates_legacy_v0_shape(self):
         from providers import get_provider_profile
 
@@ -163,6 +178,47 @@ class TestModelCatalogFetch:
         from hermes_cli.models import _LIVE_FIRST_PICKER_PROVIDERS
 
         assert "cursor" in _LIVE_FIRST_PICKER_PROVIDERS
+
+    def test_profile_description_copy(self):
+        from providers import get_provider_profile
+
+        profile = get_provider_profile("cursor")
+        assert "First-party + API models" in profile.description
+        assert "Composer + frontier" not in profile.description
+
+
+class TestModelSetupFlow:
+    def test_cursor_skips_base_url_prompt(self, monkeypatch, capsys):
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config
+
+        monkeypatch.setenv("CURSOR_API_KEY", "crsr_test_key")
+        inputs: list[str] = []
+
+        def fake_input(prompt=""):
+            inputs.append(prompt)
+            raise AssertionError(f"unexpected input prompt: {prompt!r}")
+
+        monkeypatch.setattr("builtins.input", fake_input)
+        monkeypatch.setattr(
+            "hermes_cli.main._prompt_api_key",
+            lambda pconfig, existing_key, provider_id=None: (existing_key, False),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.auth._prompt_model_selection",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.models.provider_model_ids",
+            lambda provider, force_refresh=False: ["composer-2.5", "grok-4.5"],
+        )
+
+        _model_flow_api_key_provider(load_config(), "cursor", "composer-2.5")
+
+        assert not any("Base URL" in p for p in inputs)
+        out = capsys.readouterr().out
+        assert "Endpoint: https://api.cursor.com" in out
+        assert "Found 2 model(s) from Cursor API" in out
 
 
 class TestBillingRoute:

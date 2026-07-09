@@ -194,7 +194,7 @@ class TestParserWiring:
 
 class TestRestVerbs:
     def test_models_prints_catalog(self, capsys):
-        payload = {"models": [
+        payload = {"items": [
             {"id": "composer-2.5", "displayName": "Composer 2.5",
              "aliases": ["composer-latest"],
              "parameters": [{"id": "fast", "values": [{"value": "true"},
@@ -209,6 +209,14 @@ class TestRestVerbs:
         assert "composer-2.5" in out
         assert "param fast: true|false" in out
         assert "legacy-id" in out
+
+    def test_models_accepts_legacy_models_key(self, capsys):
+        payload = {"models": [{"id": "composer-2.5"}]}
+        with patch.object(cursor_cli.urllib.request, "urlopen",
+                          return_value=_FakeRestResponse(json.dumps(payload).encode())):
+            rc = cursor_cli.cmd_models(_args(cursor_action="models"))
+        assert rc == 0
+        assert "composer-2.5" in capsys.readouterr().out
 
     def test_models_requires_key(self, monkeypatch, capsys):
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
