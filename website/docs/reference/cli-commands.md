@@ -58,6 +58,7 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes kanban` | Multi-profile collaboration board (tasks, links, dispatcher). |
 | `hermes project` | Manage named, multi-folder workspaces (projects). Anchors desktop session grouping and, when bound to a kanban board, gives tasks a deterministic worktree + branch convention. State is per-profile. |
 | `hermes webhook` | Manage dynamic webhook subscriptions for event-driven activation. |
+| `hermes cursor` | Manage Cursor cloud agents and the Cursor model catalog (launch, follow, artifacts, PR). |
 | `hermes hooks` | Inspect, approve, or remove shell-script hooks declared in `config.yaml`. |
 | `hermes doctor` | Diagnose config and dependency issues. |
 | `hermes security audit` | On-demand supply-chain audit (OSV.dev) for the venv, plugin requirements, and pinned MCP servers. |
@@ -639,6 +640,29 @@ Projects are human-named workspaces that can span multiple folders / repos. They
 | `archive` | Archive a project (recoverable). |
 | `restore` | Restore an archived project. |
 | `bind-board` | Bind a kanban board to this project. |
+
+## `hermes cursor`
+
+```bash
+hermes cursor <models|me|repos|launch|list|status|follow|send|cancel|artifacts|archive|unarchive|delete>
+```
+
+Manage Cursor cloud agents and the Cursor model catalog via the official cursor-sdk. Requires `CURSOR_API_KEY`. To use Cursor models as your primary chat models, run `hermes model` and pick Cursor instead — see [Cursor Provider](/user-guide/features/cursor-agent-runtime).
+
+| Subcommand | Description |
+|------------|-------------|
+| `models` | List Cursor models with per-model parameters and preset variants. |
+| `me` | Validate the API key and show the account it belongs to. |
+| `repos` | List repositories connected for cloud agents. |
+| `launch` | Launch a cloud agent on a repo: `hermes cursor launch "task" --repo <url> [--ref <ref>] [--model <id>] [--pr] [--branch-current] [--pool <name>] [--env-var K=V] [--follow]`. |
+| `list` / `ls` | List cloud agents (`--archived` to include archived). |
+| `status` | Show one agent plus its recent runs. |
+| `follow` | Stream a live run's events (Ctrl+C detaches without cancelling). |
+| `send` | Send a follow-up prompt to an existing agent (`--follow` to stream). |
+| `cancel` | Cancel the agent's active run. |
+| `artifacts` | List artifacts; `--download DIR` fetches them. |
+| `archive` / `unarchive` | Soft-delete / restore an agent (transcript stays readable). |
+| `delete` | Permanently delete an agent (requires `--yes`). |
 
 ## `hermes webhook`
 
