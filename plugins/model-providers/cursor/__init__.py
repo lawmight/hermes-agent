@@ -89,7 +89,7 @@ class CursorProfile(ProviderProfile):
         if isinstance(data, dict):
             for key in ("items", "models"):
                 candidate = data.get(key)
-                if isinstance(candidate, list):
+                if isinstance(candidate, list) and candidate:
                     raw_models = candidate
                     break
         if not isinstance(raw_models, list):

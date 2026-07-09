@@ -2695,11 +2695,30 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         if model_list:
             print(f"  Found {len(model_list)} model(s) from LM Studio")
     elif provider_id == "cursor":
-        from hermes_cli.models import provider_model_ids
+        from providers import get_provider_profile
 
-        model_list = provider_model_ids("cursor", force_refresh=True)
-        if model_list:
+        profile = get_provider_profile("cursor")
+        api_key_for_probe = existing_key or (
+            get_env_value(key_env) if key_env else ""
+        )
+        live = (
+            profile.fetch_models(
+                api_key=api_key_for_probe, base_url=effective_base
+            )
+            if api_key_for_probe
+            else None
+        )
+        if live:
+            model_list = live
             print(f"  Found {len(model_list)} model(s) from Cursor API")
+        else:
+            model_list = list(
+                profile.fallback_models or _PROVIDER_MODELS.get("cursor", [])
+            )
+            if model_list:
+                print(
+                    f'  Showing {len(model_list)} curated models — use "Enter custom model name" for others.'
+                )
     elif provider_id == "ollama-cloud":
         from hermes_cli.models import fetch_ollama_cloud_models
 

@@ -165,6 +165,17 @@ class TestModelCatalogFetch:
         ):
             assert profile.fetch_models(api_key="k") == ["a", "b"]
 
+    def test_fetch_models_prefers_nonempty_models_over_empty_items(self):
+        from providers import get_provider_profile
+
+        profile = get_provider_profile("cursor")
+        payload = {"items": [], "models": [{"id": "composer-2.5"}]}
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self._Response(json.dumps(payload).encode()),
+        ):
+            assert profile.fetch_models(api_key="k") == ["composer-2.5"]
+
     def test_fetch_models_failure_returns_none(self):
         from providers import get_provider_profile
 
@@ -208,9 +219,13 @@ class TestModelSetupFlow:
             "hermes_cli.auth._prompt_model_selection",
             lambda *a, **k: None,
         )
+        from providers import get_provider_profile
+
+        profile = get_provider_profile("cursor")
         monkeypatch.setattr(
-            "hermes_cli.models.provider_model_ids",
-            lambda provider, force_refresh=False: ["composer-2.5", "grok-4.5"],
+            profile,
+            "fetch_models",
+            lambda **kw: ["composer-2.5", "grok-4.5"],
         )
 
         _model_flow_api_key_provider(load_config(), "cursor", "composer-2.5")
