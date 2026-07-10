@@ -41,6 +41,7 @@ def test_cleanup_forwards_session_messages(mock_invoke_hook):
         cli_mod._active_agent_ref = None
         cli_mod._cleanup_done = False
 
+    agent._close_external_runtime_sessions.assert_called_once_with()
     agent.shutdown_memory_provider.assert_called_once_with(transcript)
 
 
