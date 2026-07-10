@@ -422,7 +422,7 @@ def run_cursor_agent_turn(
         # Crash → unconditionally drop the session so the next turn
         # rebuilds bridge + agent instead of reusing a dead client.
         try:
-            agent._cursor_session.close()
+            agent._cursor_session.retire()
         except Exception:
             pass
         agent._cursor_session = None
@@ -445,7 +445,7 @@ def run_cursor_agent_turn(
     if getattr(turn, "should_retire", False):
         logger.warning("cursor session retired (turn error: %s)", turn.error)
         try:
-            agent._cursor_session.close()
+            agent._cursor_session.retire()
         except Exception:
             pass
         agent._cursor_session = None

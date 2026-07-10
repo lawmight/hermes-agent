@@ -359,6 +359,15 @@ class TestEnsureStarted:
         assert agent.closed and client.closed
         assert session._agent is None and session._client is None
 
+    def test_retire_clears_persisted_agent_handle(self):
+        session, _ = make_session(session_id="wedged-session")
+        session.ensure_started()
+        assert load_persisted_agent_record("wedged-session") is not None
+
+        session.retire()
+
+        assert load_persisted_agent_record("wedged-session") is None
+
 
 class TestResume:
     def test_resume_uses_persisted_record(self, tmp_path):

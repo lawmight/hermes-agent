@@ -608,6 +608,11 @@ class CursorSDKSession:
         self._agent = None
         self._client = None
 
+    def retire(self) -> None:
+        """Close a wedged session and prevent later resume of its agent id."""
+        self.close()
+        clear_persisted_agent_record(self._session_id)
+
     def __enter__(self) -> "CursorSDKSession":
         return self
 
