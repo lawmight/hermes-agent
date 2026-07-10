@@ -716,8 +716,6 @@ class CursorSDKSession:
         )
         if total_usage:
             result.token_usage_total = total_usage
-            if result.token_usage_last is None:
-                result.token_usage_last = total_usage
 
         if status == "error" and not result.error:
             result.error = self._format_error(

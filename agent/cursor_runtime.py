@@ -114,10 +114,18 @@ def _record_cursor_usage(agent, turn) -> Dict[str, Any]:
     """
     agent.session_api_calls += 1
 
-    usage = getattr(turn, "token_usage_last", None) or getattr(
-        turn, "token_usage_total", None
-    )
-    if not isinstance(usage, dict) or not usage:
+    last_usage = getattr(turn, "token_usage_last", None)
+    total_usage = getattr(turn, "token_usage_total", None)
+    if not isinstance(last_usage, dict) or not last_usage:
+        last_usage = None
+    if not isinstance(total_usage, dict) or not total_usage:
+        total_usage = None
+
+    # Cursor emits one usage event per internal model step and the SDK sums
+    # those events into ``run.usage``. The sum is correct for billing/session
+    # accounting but is not the occupancy of the final context window.
+    billing_usage = total_usage or last_usage
+    if billing_usage is None:
         if agent._session_db and agent.session_id:
             try:
                 if not agent._session_db_created:
@@ -136,18 +144,28 @@ def _record_cursor_usage(agent, turn) -> Dict[str, Any]:
 
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
-    canonical_usage = CanonicalUsage(
-        input_tokens=_coerce_usage_int(usage.get("input_tokens")),
-        output_tokens=_coerce_usage_int(usage.get("output_tokens")),
-        cache_read_tokens=_coerce_usage_int(usage.get("cache_read_tokens")),
-        cache_write_tokens=_coerce_usage_int(usage.get("cache_write_tokens")),
-        reasoning_tokens=_coerce_usage_int(usage.get("reasoning_tokens")),
-        raw_usage=usage,
-    )
+    def _canonicalize(raw_usage: dict) -> CanonicalUsage:
+        return CanonicalUsage(
+            input_tokens=_coerce_usage_int(raw_usage.get("input_tokens")),
+            output_tokens=_coerce_usage_int(raw_usage.get("output_tokens")),
+            cache_read_tokens=_coerce_usage_int(
+                raw_usage.get("cache_read_tokens")
+            ),
+            cache_write_tokens=_coerce_usage_int(
+                raw_usage.get("cache_write_tokens")
+            ),
+            reasoning_tokens=_coerce_usage_int(
+                raw_usage.get("reasoning_tokens")
+            ),
+            raw_usage=raw_usage,
+        )
+
+    canonical_usage = _canonicalize(billing_usage)
     prompt_tokens = canonical_usage.prompt_tokens
     completion_tokens = canonical_usage.output_tokens
     total_tokens = (
-        _coerce_usage_int(usage.get("total_tokens")) or canonical_usage.total_tokens
+        _coerce_usage_int(billing_usage.get("total_tokens"))
+        or canonical_usage.total_tokens
     )
     usage_dict = {
         "prompt_tokens": prompt_tokens,
@@ -160,13 +178,32 @@ def _record_cursor_usage(agent, turn) -> Dict[str, Any]:
         "reasoning_tokens": canonical_usage.reasoning_tokens,
     }
 
-    # Keep the context bar loosely accurate. Cursor manages its own window
-    # (and self-compacts) — this is best-effort telemetry, not a compaction
-    # trigger; Hermes' compression is inert on this runtime.
+    # Update the context bar only from the final individual usage event.
+    # When the SDK supplies total-only metadata, retaining the previous meter
+    # is more truthful than displaying a multi-step aggregate as window fill.
+    context_prompt_tokens: Optional[int] = None
+    context_usage: Optional[CanonicalUsage] = None
     compressor = getattr(agent, "context_compressor", None)
-    if compressor is not None:
+    if last_usage is not None:
+        context_usage = _canonicalize(last_usage)
+        context_prompt_tokens = context_usage.prompt_tokens
+    if compressor is not None and context_usage is not None:
         try:
-            compressor.update_from_response(usage_dict)
+            compressor.update_from_response(
+                {
+                    "prompt_tokens": context_prompt_tokens,
+                    "completion_tokens": context_usage.output_tokens,
+                    "total_tokens": (
+                        _coerce_usage_int(last_usage.get("total_tokens"))
+                        or context_usage.total_tokens
+                    ),
+                    "input_tokens": context_usage.input_tokens,
+                    "output_tokens": context_usage.output_tokens,
+                    "cache_read_tokens": context_usage.cache_read_tokens,
+                    "cache_write_tokens": context_usage.cache_write_tokens,
+                    "reasoning_tokens": context_usage.reasoning_tokens,
+                }
+            )
         except Exception:
             logger.debug("cursor usage update failed", exc_info=True)
 
@@ -219,14 +256,16 @@ def _record_cursor_usage(agent, turn) -> Dict[str, Any]:
                 agent.session_id, total_tokens, exc,
             )
 
-    return {
+    result = {
         **usage_dict,
-        "last_prompt_tokens": prompt_tokens,
         "estimated_cost_usd": float(cost_result.amount_usd)
         if cost_result.amount_usd is not None else None,
         "cost_status": cost_result.status,
         "cost_source": cost_result.source,
     }
+    if context_prompt_tokens is not None:
+        result["last_prompt_tokens"] = context_prompt_tokens
+    return result
 
 
 def _build_cursor_session(agent, effective_task_id: str):

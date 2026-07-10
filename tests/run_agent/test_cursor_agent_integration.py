@@ -163,6 +163,68 @@ class TestRunConversationCursorPath:
         assert agent.session_completion_tokens == 25
         assert agent.session_total_tokens == 130
 
+    def test_context_meter_uses_last_step_while_accounting_uses_run_total(
+        self, monkeypatch
+    ):
+        def fake_run_turn(self, user_input, **kwargs):
+            return CursorTurnResult(
+                final_text="done",
+                projected_messages=[{"role": "assistant", "content": "done"}],
+                token_usage_last={
+                    "input_tokens": 10_000,
+                    "output_tokens": 1_000,
+                    "cache_read_tokens": 90_000,
+                    "cache_write_tokens": 0,
+                    "total_tokens": 101_000,
+                    "reasoning_tokens": 0,
+                },
+                token_usage_total={
+                    "input_tokens": 30_000,
+                    "output_tokens": 3_000,
+                    "cache_read_tokens": 270_000,
+                    "cache_write_tokens": 0,
+                    "total_tokens": 303_000,
+                    "reasoning_tokens": 0,
+                },
+            )
+
+        monkeypatch.setattr(CursorSDKSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(CursorSDKSession, "ensure_started", lambda self: "a")
+        agent = _make_cursor_agent()
+
+        result = agent.run_conversation("tool-heavy task")
+
+        assert result["prompt_tokens"] == 300_000
+        assert result["last_prompt_tokens"] == 100_000
+        assert agent.session_prompt_tokens == 300_000
+        assert agent.context_compressor.last_prompt_tokens == 100_000
+
+    def test_total_only_usage_does_not_overwrite_context_meter(self, monkeypatch):
+        def fake_run_turn(self, user_input, **kwargs):
+            return CursorTurnResult(
+                final_text="done",
+                projected_messages=[{"role": "assistant", "content": "done"}],
+                token_usage_total={
+                    "input_tokens": 300_000,
+                    "output_tokens": 3_000,
+                    "cache_read_tokens": 2_700_000,
+                    "cache_write_tokens": 0,
+                    "total_tokens": 3_003_000,
+                    "reasoning_tokens": 0,
+                },
+            )
+
+        monkeypatch.setattr(CursorSDKSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(CursorSDKSession, "ensure_started", lambda self: "a")
+        agent = _make_cursor_agent()
+        agent.context_compressor.last_prompt_tokens = 77
+
+        result = agent.run_conversation("tool-heavy task")
+
+        assert result["prompt_tokens"] == 3_000_000
+        assert "last_prompt_tokens" not in result
+        assert agent.context_compressor.last_prompt_tokens == 77
+
     def test_error_turn_reports_partial(self, monkeypatch):
         def fake_run_turn(self, user_input, **kwargs):
             return CursorTurnResult(

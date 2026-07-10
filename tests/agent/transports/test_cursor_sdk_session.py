@@ -431,6 +431,27 @@ class TestRunTurn:
         assert result.agent_id == "agent-0001"
         assert result.run_id == "run-0001"
 
+    def test_total_only_usage_does_not_masquerade_as_last_step(self):
+        session, _ = make_session()
+        session.ensure_started()
+        session._agent.queue_run(FakeRun(
+            [{"type": "assistant",
+              "message": {"content": [{"type": "text", "text": "done"}]}}],
+            usage=SimpleNamespace(
+                input_tokens=300,
+                output_tokens=30,
+                cache_read_tokens=2700,
+                cache_write_tokens=0,
+                total_tokens=3030,
+                reasoning_tokens=0,
+            ),
+        ))
+
+        result = session.run_turn("work")
+
+        assert result.token_usage_last is None
+        assert result.token_usage_total["total_tokens"] == 3030
+
     def test_tool_progress_bridged(self):
         seen = []
         session, _ = make_session(on_tool_event=lambda n, p, a: seen.append((n, p)))
