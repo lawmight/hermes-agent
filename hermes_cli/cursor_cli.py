@@ -25,6 +25,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
+from agent.transports.cursor_bridge import launch_cursor_bridge
+
 CURSOR_API_BASE_URL = "https://api.cursor.com"
 
 
@@ -87,11 +89,7 @@ def _get_sdk():
 
 
 def _launch_client(sdk):
-    client_cls = getattr(sdk, "CursorClient", None) or getattr(sdk, "Client")
-    return client_cls.launch_bridge(
-        workspace=os.getcwd(),
-        allow_api_key_env_fallback=False,
-    )
+    return launch_cursor_bridge(sdk, workspace=os.getcwd())
 
 
 @contextmanager

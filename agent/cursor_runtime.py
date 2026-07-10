@@ -20,7 +20,16 @@ import base64
 import logging
 from typing import Any, Dict, List, Optional
 
+from agent.memory_manager import build_memory_context_block
+
 logger = logging.getLogger(__name__)
+
+_CURSOR_HOST_CONTEXT = (
+    "[Hermes host context]\n"
+    "You are a Cursor agent running inside Hermes. Hermes provides the "
+    "surrounding session, gateway, memory, and custom tools. Identify as the "
+    "selected Cursor model, not as Hermes."
+)
 
 
 def _coerce_usage_int(value: Any) -> int:
@@ -75,6 +84,23 @@ def _extract_images_from_content(content: Any) -> list[dict]:
         else:
             images.append({"url": url})
     return images
+
+
+def _compose_cursor_user_input(
+    user_message: str,
+    *,
+    external_memory_context: str = "",
+    plugin_user_context: str = "",
+) -> str:
+    """Add API-only host, memory, and plugin context to one user payload."""
+    injections = [_CURSOR_HOST_CONTEXT]
+    if external_memory_context:
+        fenced_memory = build_memory_context_block(external_memory_context)
+        if fenced_memory:
+            injections.append(fenced_memory)
+    if plugin_user_context:
+        injections.append(plugin_user_context)
+    return user_message + "\n\n" + "\n\n".join(injections)
 
 
 def _load_cursor_runtime_config() -> tuple[dict, Optional[dict]]:
@@ -289,6 +315,25 @@ def _build_cursor_session(agent, effective_task_id: str):
         except Exception:
             logger.debug("cursor tool-progress callback raised", exc_info=True)
 
+    def _on_text_delta(text: str) -> None:
+        agent._fire_stream_delta(text)
+
+    def _on_reasoning_delta(text: str) -> None:
+        agent._fire_reasoning_delta(text)
+
+    cursor_step_count = 0
+
+    def _on_step(step: Any) -> None:
+        nonlocal cursor_step_count
+        callback = getattr(agent, "step_callback", None)
+        if callback is None:
+            return
+        cursor_step_count += 1
+        try:
+            callback(cursor_step_count, [])
+        except Exception:
+            logger.debug("cursor step callback raised", exc_info=True)
+
     return CursorSDKSession(
         cwd=cwd,
         api_key=getattr(agent, "api_key", None),
@@ -299,6 +344,11 @@ def _build_cursor_session(agent, effective_task_id: str):
         session_title=getattr(agent, "session_title", None),
         task_id=effective_task_id,
         on_tool_event=_on_tool_event,
+        enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+        disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+        on_text_delta=_on_text_delta,
+        on_reasoning_delta=_on_reasoning_delta,
+        on_step=_on_step if getattr(agent, "step_callback", None) is not None else None,
         # Poll the agent's interrupt flag so /stop (gateway) and Ctrl+C (CLI)
         # cancel the in-flight cursor run.
         interrupt_check=lambda: bool(getattr(agent, "_interrupt_requested", False)),
@@ -331,6 +381,8 @@ def run_cursor_agent_turn(
     messages: List[Dict[str, Any]],
     effective_task_id: str,
     should_review_memory: bool = False,
+    external_memory_context: str = "",
+    plugin_user_context: str = "",
 ) -> Dict[str, Any]:
     """Cursor runtime path. Hands the entire turn to the cursor-sdk agent
     and projects its stream back into Hermes' messages list so memory/skill
@@ -350,10 +402,15 @@ def run_cursor_agent_turn(
     # append again — that would duplicate it.
 
     images = _extract_images_from_content(original_user_message)
+    outbound_user_message = _compose_cursor_user_input(
+        user_message,
+        external_memory_context=external_memory_context,
+        plugin_user_context=plugin_user_context,
+    )
 
     try:
         turn = agent._cursor_session.run_turn(
-            user_message,
+            outbound_user_message,
             images=images or None,
             # Pass the agent's current model every turn — the session tracks
             # the sticky selection and only sends an override after a

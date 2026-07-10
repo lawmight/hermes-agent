@@ -46,6 +46,8 @@ def build_cursor_custom_tools(
     *,
     session_id: Optional[str] = None,
     on_tool_event: Optional[Callable[[str, str, dict], None]] = None,
+    enabled_toolsets: Optional[list[str]] = None,
+    disabled_toolsets: Optional[list[str]] = None,
 ) -> dict[str, dict]:
     """Build the ``custom_tools`` mapping for ``LocalAgentOptions``.
 
@@ -62,7 +64,14 @@ def build_cursor_custom_tools(
 
     all_defs = {
         td["function"]["name"]: td["function"]
-        for td in (get_tool_definitions(quiet_mode=True) or [])
+        for td in (
+            get_tool_definitions(
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
+                quiet_mode=True,
+            )
+            or []
+        )
         if isinstance(td, dict) and td.get("type") == "function"
     }
 

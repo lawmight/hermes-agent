@@ -424,6 +424,11 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "HASS_TOKEN",
     "EMAIL_PASSWORD",
     "HERMES_DASHBOARD_SESSION_TOKEN",
+    # Cursor web-session cookie injected into Cursor Cloud Agent environments.
+    # The SDK bridge only needs the explicit CURSOR_API_KEY passed in options;
+    # exposing this browser session to model-driven shell commands grants
+    # unrelated account-level web access.
+    "WorkosCursorSessionToken",
     # Remote-compute / infrastructure secrets
     "MODAL_TOKEN_ID",
     "MODAL_TOKEN_SECRET",

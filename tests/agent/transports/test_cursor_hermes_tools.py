@@ -50,6 +50,26 @@ class TestBuildCursorCustomTools:
             tools = build_cursor_custom_tools(None)
         assert set(tools) == set(EXPOSED_TOOLS)
 
+    def test_session_toolset_filters_are_forwarded(self):
+        with patch(
+            "model_tools.get_tool_definitions",
+            return_value=_fake_defs(["web_search"]),
+        ) as get_definitions, patch(
+            "model_tools.handle_function_call",
+            return_value="{}",
+        ):
+            build_cursor_custom_tools(
+                None,
+                enabled_toolsets=["search"],
+                disabled_toolsets=["browser"],
+            )
+
+        get_definitions.assert_called_once_with(
+            enabled_toolsets=["search"],
+            disabled_toolsets=["browser"],
+            quiet_mode=True,
+        )
+
     def test_executor_dispatches_through_handle_function_call(self):
         calls = []
 

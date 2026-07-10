@@ -1496,8 +1496,9 @@ DEFAULT_CONFIG = {
                                      # Empty (default) = inline config only, matching the
                                      # SDK's own default.
         "sandbox": {},               # Pass-through SandboxOptions dict for local runs.
-        "model_params": {},          # Per-model parameter values forwarded as
-                                     # ModelSelection.params, e.g. {fast: "true"}.
+        "model_params": {},          # Model-keyed parameter values forwarded as
+                                     # ModelSelection.params, e.g.
+                                     # {"composer-2.5": {fast: "true"}}.
                                      # Discover valid ids with `hermes cursor models`.
         "agents": {},                # Inline subagent definitions passed to Agent.create:
                                      # {name: {description: ..., prompt: ..., model: inherit}}.

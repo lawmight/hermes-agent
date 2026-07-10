@@ -51,6 +51,12 @@ class FakeAuthenticationError(FakeCursorAgentError):
     pass
 
 
+class FakeSendOptions:
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
 class FakeRun:
     def __init__(self, messages=(), *, status="finished", result="final text",
                  model="composer-2.5", usage=None, block_until_cancel=False):
@@ -169,6 +175,7 @@ def make_fake_sdk():
         AgentBusyError=FakeAgentBusyError,
         RateLimitError=FakeRateLimitError,
         AuthenticationError=FakeAuthenticationError,
+        SendOptions=FakeSendOptions,
     )
 
 
@@ -203,6 +210,18 @@ class TestBuildModelSelection:
             "id": "composer-2.5",
             "params": [{"id": "fast", "value": "True"}],
         }
+
+    def test_model_scoped_params_do_not_leak_after_switch(self):
+        params = {
+            "composer-2.5": {"fast": "true"},
+            "claude-fable-5": {"thinking": "high"},
+        }
+
+        assert build_model_selection("composer-2.5", params) == {
+            "id": "composer-2.5",
+            "params": [{"id": "fast", "value": "true"}],
+        }
+        assert build_model_selection("grok-4.5", params) == "grok-4.5"
 
     def test_empty_model_passes_through(self):
         assert build_model_selection("", {"fast": "true"}) == ""
@@ -451,6 +470,27 @@ class TestRunTurn:
 
         assert result.token_usage_last is None
         assert result.token_usage_total["total_tokens"] == 3030
+
+    def test_typed_send_callbacks_forward_text_reasoning_and_steps(self):
+        text_deltas = []
+        reasoning_deltas = []
+        steps = []
+        session, _ = make_session(
+            on_text_delta=text_deltas.append,
+            on_reasoning_delta=reasoning_deltas.append,
+            on_step=steps.append,
+        )
+        session.ensure_started()
+
+        session.run_turn("stream")
+        options = session._agent.send_calls[0][1]
+        options.on_delta(SimpleNamespace(type="text-delta", text="hello"))
+        options.on_delta(SimpleNamespace(type="thinking-delta", text="hmm"))
+        options.on_step({"type": "assistantMessage"})
+
+        assert text_deltas == ["hello"]
+        assert reasoning_deltas == ["hmm"]
+        assert steps == [{"type": "assistantMessage"}]
 
     def test_tool_progress_bridged(self):
         seen = []

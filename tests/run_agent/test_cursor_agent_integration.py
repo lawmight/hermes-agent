@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 
 import run_agent
+from agent.cursor_runtime import _compose_cursor_user_input
 from agent.transports.cursor_sdk_session import CursorSDKSession, CursorTurnResult
 
 
@@ -27,15 +28,16 @@ def fake_session(monkeypatch):
     so we can drive AIAgent without the cursor-sdk or any network."""
 
     def fake_run_turn(self, user_input, **kwargs):
+        visible_input = str(user_input).split("\n\n[Hermes host context]", 1)[0]
         return CursorTurnResult(
-            final_text=f"echo: {user_input}",
+            final_text=f"echo: {visible_input}",
             projected_messages=[
                 {"role": "assistant", "content": None,
                  "tool_calls": [{"id": "cursor_c1", "type": "function",
                                  "function": {"name": "exec_command",
                                               "arguments": "{}"}}]},
                 {"role": "tool", "tool_call_id": "cursor_c1", "content": "ok"},
-                {"role": "assistant", "content": f"echo: {user_input}"},
+                {"role": "assistant", "content": f"echo: {visible_input}"},
             ],
             tool_iterations=1,
             interrupted=False,
@@ -91,6 +93,18 @@ class TestConstruction:
 
 
 class TestRunConversationCursorPath:
+    def test_outbound_context_is_ephemeral_and_single_message(self):
+        composed = _compose_cursor_user_input(
+            "hello",
+            external_memory_context="The user's dog is Biscuit.",
+            plugin_user_context="[plugin context] tenant=acme",
+        )
+
+        assert composed.startswith("hello\n\n[Hermes host context]")
+        assert "running inside Hermes" in composed
+        assert "Biscuit" in composed
+        assert "tenant=acme" in composed
+
     def test_run_conversation_returns_cursor_shape(self, fake_session):
         agent = _make_cursor_agent()
         with patch.object(agent, "_spawn_background_review", return_value=None):
@@ -103,6 +117,12 @@ class TestRunConversationCursorPath:
         assert result["cursor_agent_id"] == "agent-stub-1"
         assert result["cursor_run_id"] == "run-stub-1"
         assert result["agent_persisted"] is True
+        user_messages = [
+            message["content"]
+            for message in result["messages"]
+            if message.get("role") == "user"
+        ]
+        assert user_messages[-1] == "hello there"
 
     def test_projected_messages_land_in_history(self, fake_session):
         agent = _make_cursor_agent()

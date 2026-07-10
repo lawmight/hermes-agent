@@ -74,7 +74,7 @@ cursor:
   inherit_mcp: false        # pass Hermes' mcp_servers to cursor inline
   setting_sources: []       # project|user|team|mdm|plugins|all (SDK local runs)
   sandbox: {}               # pass-through SandboxOptions for local runs
-  model_params: {}          # e.g. {fast: "true"} → ModelSelection params
+  model_params: {}          # e.g. {composer-2.5: {fast: "true"}}
   agents: {}                # inline subagent definitions (description + prompt)
   timeout_seconds: 1800     # idle timeout; resets on every stream event
   cloud:
@@ -90,7 +90,8 @@ compression:
 - **`mode: plan`** keeps runs in explore/design posture — the practical read-only switch.
 - **`setting_sources`** lets local runs pick up `.cursor/` project config (rules, file-based MCP, `.cursor/agents/*.md` subagents, hooks). Default is inline-only, matching the SDK.
 - **`inherit_mcp: true`** translates your `mcp_servers:` config into inline SDK MCP definitions per run. Servers that need interactive OAuth are skipped (the SDK can't open a browser).
-- **`model_params`** feed per-model parameters (discover ids with `hermes cursor models`).
+- **`model_params`** maps model ids to that model's parameters (discover ids with
+  `hermes cursor models`). Legacy flat maps remain supported as global defaults.
 - **`agents`** defines named subagents cursor can spawn via its `Agent` tool:
 
   ```yaml
@@ -127,13 +128,15 @@ Side-LLM work (title generation, compression summaries, vision fallback, embeddi
 
 ## Context handling
 
-Cursor manages its own context window (200K for Composer) and self-compacts when needed. Hermes' compression is **inert** on this runtime — it never rewrites the projected transcript (`compression.cursor_auto: native`). The context bar reads the SDK's per-turn token usage and is best-effort.
+Cursor manages its own context window (200K for Composer) and self-compacts when needed. Hermes' compression is **inert** on this runtime — it never rewrites the projected transcript (`compression.cursor_auto: native`). Billing counters use the SDK's run total; the context bar uses only the final internal model step so tool-loop aggregates are never displayed as window fill.
 
 ## Security posture
 
 - Cursor-internal tool calls (shell, edits) are governed by **cursor's own permission model** — `cursor.mode: plan`, `cursor.sandbox` options, and file-based [hooks](https://cursor.com/docs/agent/hooks) (`.cursor/hooks.json`). The SDK exposes no programmatic approval callback, so **Hermes' approval prompts do not gate cursor-internal commands**. This mirrors the Codex runtime's sandbox note.
 - Hermes-bridged custom tools DO run through Hermes' normal pipeline (plugin hooks, guardrails, redaction).
-- The bridge subprocess is spawned with Hermes' internal Tier-1 secrets (gateway bot tokens, GitHub auth, infra tokens) stripped from its environment where the SDK allows env control; your own project env vars remain, matching how cursor's local agent is documented to inherit the caller environment.
+- The bridge subprocess receives Hermes' sanitized subprocess environment:
+  gateway, provider, tool, browser-session, GitHub, and infrastructure secrets
+  are stripped before Cursor's model-driven shell starts.
 - `CURSOR_API_KEY` is a secret: `.env` only, never `config.yaml`.
 
 ## Cloud agents (`hermes cursor`)
@@ -147,7 +150,7 @@ hermes cursor repos                  # repos connected for cloud agents
 hermes cursor launch "task" --repo https://github.com/o/r --pr
 hermes cursor list [--archived]
 hermes cursor status <bc-id>
-hermes cursor follow <bc-id>         # stream a live run (Ctrl+C detaches)
+hermes cursor follow <bc-id>         # follow a run; detached handles wait for its result
 hermes cursor send <bc-id> "more"    # follow-up prompt
 hermes cursor cancel <bc-id>
 hermes cursor artifacts <bc-id> --download ./out

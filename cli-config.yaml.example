@@ -501,7 +501,8 @@ cursor:
   # Pass-through SandboxOptions dict for local runs.
   sandbox: {}
 
-  # Per-model parameter values (ModelSelection.params), e.g. {fast: "true"}.
+  # Model-keyed parameter values (ModelSelection.params), e.g.:
+  #   composer-2.5: {fast: "true"}
   # Discover valid ids with `hermes cursor models`.
   model_params: {}
 

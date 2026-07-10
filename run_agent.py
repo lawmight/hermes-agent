@@ -5838,10 +5838,21 @@ class AIAgent:
         messages: List[Dict[str, Any]],
         effective_task_id: str,
         should_review_memory: bool = False,
+        external_memory_context: str = "",
+        plugin_user_context: str = "",
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.cursor_runtime.run_cursor_agent_turn``."""
         from agent.cursor_runtime import run_cursor_agent_turn
-        return run_cursor_agent_turn(self, user_message=user_message, original_user_message=original_user_message, messages=messages, effective_task_id=effective_task_id, should_review_memory=should_review_memory)
+        return run_cursor_agent_turn(
+            self,
+            user_message=user_message,
+            original_user_message=original_user_message,
+            messages=messages,
+            effective_task_id=effective_task_id,
+            should_review_memory=should_review_memory,
+            external_memory_context=external_memory_context,
+            plugin_user_context=plugin_user_context,
+        )
 
 def main(
     query: str = None,

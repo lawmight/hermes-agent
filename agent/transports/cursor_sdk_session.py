@@ -37,11 +37,12 @@ import os
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
+from agent.transports.cursor_bridge import launch_cursor_bridge
 from agent.transports.cursor_event_projector import CursorEventProjector
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
@@ -133,8 +134,9 @@ def clear_persisted_agent_record(session_id: Optional[str]) -> None:
 def build_model_selection(model_id: str, model_params: Any = None) -> Any:
     """Build the SDK model argument: bare id, or {"id", "params"} mapping.
 
-    ``model_params`` is the ``cursor.model_params`` config mapping, e.g.
-    ``{"fast": "true"}`` → ``params: [{"id": "fast", "value": "true"}]``.
+    ``model_params`` accepts a model-keyed mapping, e.g.
+    ``{"composer-2.5": {"fast": "true"}}``. A legacy flat mapping remains
+    supported as a global default for backward compatibility.
     Values are stringified — the SDK's ModelParameterValue.value is a str.
     Invalid ids/values are passed through for the server to validate; we do
     not hardcode a parameter catalog that would rot.
@@ -144,6 +146,16 @@ def build_model_selection(model_id: str, model_params: Any = None) -> Any:
         return model_id
     if not isinstance(model_params, dict) or not model_params:
         return model_id
+
+    scoped_params = model_params.get(model_id)
+    if isinstance(scoped_params, dict):
+        model_params = scoped_params
+    elif any(isinstance(value, dict) for value in model_params.values()):
+        default_params = model_params.get("default")
+        if not isinstance(default_params, dict):
+            return model_id
+        model_params = default_params
+
     params = [
         {"id": str(key), "value": str(value)}
         for key, value in model_params.items()
@@ -332,6 +344,11 @@ class CursorSDKSession:
         task_id: Optional[str] = None,
         on_tool_event: Optional[Callable[[str, str, dict], None]] = None,
         interrupt_check: Optional[Callable[[], bool]] = None,
+        enabled_toolsets: Optional[list[str]] = None,
+        disabled_toolsets: Optional[list[str]] = None,
+        on_text_delta: Optional[Callable[[str], None]] = None,
+        on_reasoning_delta: Optional[Callable[[str], None]] = None,
+        on_step: Optional[Callable[[Any], None]] = None,
         sdk_module: Any = None,
         custom_tools_builder: Optional[Callable[..., dict]] = None,
     ) -> None:
@@ -345,6 +362,11 @@ class CursorSDKSession:
         self._task_id = task_id
         self._on_tool_event = on_tool_event
         self._interrupt_check = interrupt_check
+        self._enabled_toolsets = enabled_toolsets
+        self._disabled_toolsets = disabled_toolsets
+        self._on_text_delta = on_text_delta
+        self._on_reasoning_delta = on_reasoning_delta
+        self._on_step = on_step
         self._sdk = sdk_module
         self._custom_tools_builder = custom_tools_builder
 
@@ -398,29 +420,7 @@ class CursorSDKSession:
         return self._sdk
 
     def _launch_client(self, sdk: Any) -> Any:
-        client_cls = getattr(sdk, "CursorClient", None) or getattr(sdk, "Client")
-        # Strip Hermes-internal Tier-1 secrets (gateway bot tokens, GitHub
-        # auth, infra tokens) from the bridge subprocess while keeping the
-        # rest of the user's environment — cursor's local shell tools
-        # legitimately inherit the caller env (documented SDK behavior), but
-        # Hermes' own operational secrets are never the agent's business.
-        # The env kwarg is not part of the documented launch_bridge surface
-        # yet, so fall back to a plain launch when unsupported.
-        try:
-            from tools.environments.local import hermes_subprocess_env
-
-            env = hermes_subprocess_env(inherit_credentials=True)
-        except Exception:
-            env = None
-        if env is not None:
-            try:
-                return client_cls.launch_bridge(workspace=self._cwd, env=env)
-            except TypeError:
-                logger.debug(
-                    "cursor-sdk launch_bridge has no env kwarg; launching with "
-                    "inherited environment"
-                )
-        return client_cls.launch_bridge(workspace=self._cwd)
+        return launch_cursor_bridge(sdk, workspace=self._cwd)
 
     def _build_create_kwargs(self) -> dict[str, Any]:
         # cursor-sdk 0.1.9 ``agents.create`` only accepts top-level
@@ -483,6 +483,8 @@ class CursorSDKSession:
                     self._task_id,
                     session_id=self._session_id,
                     on_tool_event=self._on_tool_event,
+                    enabled_toolsets=self._enabled_toolsets,
+                    disabled_toolsets=self._disabled_toolsets,
                 )
             except Exception:
                 logger.exception("cursor custom_tools build failed; continuing without")
@@ -750,7 +752,7 @@ class CursorSDKSession:
 
     def _build_send_options(
         self, *, model: Optional[str], mode: Optional[str]
-    ) -> Optional[dict]:
+    ) -> Any:
         options: dict[str, Any] = {}
         model = (model or "").strip()
         if model and model != self._sticky_model:
@@ -760,9 +762,48 @@ class CursorSDKSession:
         mode = (mode or "").strip().lower()
         if mode in {"agent", "plan"}:
             options["mode"] = mode
+
+        # SDK callbacks are retained only when using the typed SendOptions
+        # object; mapping options are serialized and discard Python callables.
+        send_options_cls = getattr(self._sdk, "SendOptions", None)
+        if send_options_cls is not None and (
+            self._on_text_delta is not None
+            or self._on_reasoning_delta is not None
+            or self._on_step is not None
+        ):
+            return send_options_cls(
+                model=options.get("model"),
+                mode=options.get("mode"),
+                on_delta=self._handle_sdk_delta,
+                on_step=self._handle_sdk_step if self._on_step is not None else None,
+            )
         return options or None
 
-    def _send_with_recovery(self, sdk: Any, message: Any, options: Optional[dict]) -> Any:
+    def _handle_sdk_delta(self, update: Any) -> None:
+        update_type = (
+            update.get("type")
+            if isinstance(update, dict)
+            else getattr(update, "type", "")
+        )
+        text = (
+            update.get("text", "")
+            if isinstance(update, dict)
+            else getattr(update, "text", "")
+        )
+        if update_type == "text-delta" and text and self._on_text_delta is not None:
+            self._on_text_delta(str(text))
+        elif (
+            update_type == "thinking-delta"
+            and text
+            and self._on_reasoning_delta is not None
+        ):
+            self._on_reasoning_delta(str(text))
+
+    def _handle_sdk_step(self, step: Any) -> None:
+        if self._on_step is not None:
+            self._on_step(step)
+
+    def _send_with_recovery(self, sdk: Any, message: Any, options: Any) -> Any:
         """agent.send() with busy/stuck/rate-limit recovery (one retry each)."""
         agent_busy = _exc_class(sdk, "AgentBusyError")
         rate_limit = _exc_class(sdk, "RateLimitError")
@@ -783,8 +824,20 @@ class CursorSDKSession:
                 # Local agents don't raise AgentBusyError; a stuck active run
                 # is expired via local.force per the SDK docs.
                 logger.info("cursor local run appears stuck; retrying with local.force")
-                forced = dict(options or {})
-                forced["local"] = {**(forced.get("local") or {}), "force": True}
+                if hasattr(options, "__dataclass_fields__"):
+                    current_local = getattr(options, "local", None)
+                    current_local = (
+                        dict(current_local)
+                        if isinstance(current_local, dict)
+                        else {}
+                    )
+                    forced = replace(
+                        options,
+                        local={**current_local, "force": True},
+                    )
+                else:
+                    forced = dict(options or {})
+                    forced["local"] = {**(forced.get("local") or {}), "force": True}
                 return self._agent.send(message, forced)
             if getattr(exc, "is_retryable", False):
                 self._sleep_for_retry(exc)
