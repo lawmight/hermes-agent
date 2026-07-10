@@ -40,7 +40,7 @@ def test_bridge_launch_uses_sanitized_environment_and_restores_sdk_hook():
         "SAFE": "1",
         "CURSOR_SDK_CLIENT_LANGUAGE": "python",
     }
-    assert seen["kwargs"]["allow_api_key_env_fallback"] is False
+    assert seen["kwargs"]["allow_api_key_env_fallback"] is True
     assert bridge_module._bridge_subprocess_env is original_builder
 
 

@@ -47,7 +47,13 @@ def launch_cursor_bridge(sdk: Any, *, workspace: str) -> Any:
         try:
             return client_cls.launch_bridge(
                 workspace=workspace,
-                allow_api_key_env_fallback=False,
+                # Run-scoped SDK RPCs (wait/cancel/conversation) carry only a
+                # run id and 0.1.9 rejects them when this client-side guard is
+                # disabled. The bridge environment is sanitized above, so
+                # allowing the SDK's owned-bridge path cannot expose or fall
+                # back to a process-environment API key; agent/get-run calls
+                # still pass credentials explicitly.
+                allow_api_key_env_fallback=True,
             )
         finally:
             bridge_module._bridge_subprocess_env = original_env_builder

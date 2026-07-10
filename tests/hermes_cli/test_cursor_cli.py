@@ -334,8 +334,8 @@ class TestSdkVerbs:
                 "run-detached",
                 {
                     "runtime": "cloud",
-                    "agent_id": "bc-9",
-                    "api_key": "crsr_test",
+                    "agentId": "bc-9",
+                    "apiKey": "crsr_test",
                 },
             )
         ]

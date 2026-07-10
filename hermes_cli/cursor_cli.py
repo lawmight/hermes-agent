@@ -371,8 +371,8 @@ def cmd_follow(args) -> int:
                 _attr(items[0], "id"),
                 {
                     "runtime": "cloud",
-                    "agent_id": args.agent_id,
-                    "api_key": api_key,
+                    "agentId": args.agent_id,
+                    "apiKey": api_key,
                 },
             )
 
@@ -455,8 +455,8 @@ def cmd_cancel(args) -> int:
                 _attr(active, "id"),
                 {
                     "runtime": "cloud",
-                    "agent_id": args.agent_id,
-                    "api_key": api_key,
+                    "agentId": args.agent_id,
+                    "apiKey": api_key,
                 },
             )
             run.cancel()
@@ -511,7 +511,7 @@ def _lifecycle(args, verb: str) -> int:
         with _open_client(sdk) as client:
             getattr(client.agents, verb)(
                 args.agent_id,
-                {"runtime": "cloud", "api_key": api_key},
+                {"runtime": "cloud", "apiKey": api_key},
             )
     except Exception as exc:
         return _fail(f"{verb} failed: {exc}")
