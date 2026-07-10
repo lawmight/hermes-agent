@@ -145,10 +145,7 @@ class TestModelCatalogFetch:
         ]}
         with mock.patch(
             "urllib.request.urlopen",
-            side_effect=[
-                self._Response(json.dumps(payload).encode()),
-                self._Response(json.dumps(payload).encode()),
-            ],
+            return_value=self._Response(json.dumps(payload).encode()),
         ):
             ids = profile.fetch_models(api_key="k")
         assert ids == ["composer-2.5", "gpt-5.3-codex-high"]
@@ -177,7 +174,10 @@ class TestModelCatalogFetch:
         ]}
         with mock.patch(
             "urllib.request.urlopen",
-            return_value=self._Response(json.dumps(payload).encode()),
+            side_effect=[
+                self._Response(json.dumps(payload).encode()),
+                self._Response(json.dumps(payload).encode()),
+            ],
         ):
             exact = validate_requested_model(
                 "composer-2.5",
