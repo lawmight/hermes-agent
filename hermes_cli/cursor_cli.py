@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
@@ -87,7 +88,23 @@ def _get_sdk():
 
 def _launch_client(sdk):
     client_cls = getattr(sdk, "CursorClient", None) or getattr(sdk, "Client")
-    return client_cls.launch_bridge(workspace=os.getcwd())
+    return client_cls.launch_bridge(
+        workspace=os.getcwd(),
+        allow_api_key_env_fallback=False,
+    )
+
+
+@contextmanager
+def _open_client(sdk):
+    """Yield an SDK bridge client and always close its subprocess."""
+    client = _launch_client(sdk)
+    try:
+        yield client
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def _attr(obj: Any, name: str, default: Any = "") -> Any:
@@ -197,7 +214,14 @@ def cmd_me(args) -> int:
     except Exception as exc:
         return _fail(f"auth check failed: {exc}")
     print("✓ CURSOR_API_KEY is valid")
-    for key in ("email", "name", "teamName", "apiKeyName"):
+    for key in (
+        "apiKeyName",
+        "userEmail",
+        "userFirstName",
+        "userLastName",
+        "userId",
+        "createdAt",
+    ):
         value = data.get(key) if isinstance(data, dict) else None
         if value:
             print(f"  {key}: {value}")
@@ -257,25 +281,25 @@ def cmd_launch(args) -> int:
 
     try:
         sdk = _get_sdk()
-        client = _launch_client(sdk)
-        create_kwargs: dict[str, Any] = {"api_key": api_key, "cloud": cloud}
-        if args.model:
-            create_kwargs["model"] = args.model
-        if args.name:
-            create_kwargs["name"] = args.name
-        agent = client.agents.create(**create_kwargs)
-        run = agent.send(prompt)
+        with _open_client(sdk) as client:
+            create_kwargs: dict[str, Any] = {"api_key": api_key, "cloud": cloud}
+            if args.model:
+                create_kwargs["model"] = args.model
+            if args.name:
+                create_kwargs["name"] = args.name
+            agent = client.agents.create(**create_kwargs)
+            run = agent.send(prompt)
+            agent_id = _attr(agent, "agent_id")
+            print(f"✓ cloud agent launched: {agent_id}")
+            print(f"  follow:    hermes cursor follow {agent_id}")
+            print(f"  status:    hermes cursor status {agent_id}")
+            print(f"  artifacts: hermes cursor artifacts {agent_id}")
+            follow_status = _stream_run(run) if args.follow else None
     except Exception as exc:
         return _fail(f"cloud agent launch failed: {exc}")
 
-    agent_id = _attr(agent, "agent_id")
-    print(f"✓ cloud agent launched: {agent_id}")
-    print(f"  follow:    hermes cursor follow {agent_id}")
-    print(f"  status:    hermes cursor status {agent_id}")
-    print(f"  artifacts: hermes cursor artifacts {agent_id}")
-    if args.follow:
-        status = _stream_run(run)
-        print(f"run status: {status}")
+    if follow_status is not None:
+        print(f"run status: {follow_status}")
     return 0
 
 
@@ -285,14 +309,17 @@ def cmd_list(args) -> int:
         return 1
     try:
         sdk = _get_sdk()
-        client = _launch_client(sdk)
-        kwargs: dict[str, Any] = {"runtime": "cloud"}
-        if args.archived:
-            kwargs["include_archived"] = True
-        page = client.agents.list(**kwargs)
+        with _open_client(sdk) as client:
+            kwargs: dict[str, Any] = {
+                "runtime": "cloud",
+                "api_key": api_key,
+            }
+            if args.archived:
+                kwargs["include_archived"] = True
+            page = client.agents.list(**kwargs)
+            items = list(_attr(page, "items", None) or [])
     except Exception as exc:
         return _fail(f"agent list failed: {exc}")
-    items = _attr(page, "items", None) or []
     if not items:
         print("No cloud agents. Launch one with: hermes cursor launch \"<task>\" --repo <url>")
         return 0
@@ -308,13 +335,17 @@ def cmd_status(args) -> int:
         return 1
     try:
         sdk = _get_sdk()
-        client = _launch_client(sdk)
-        info = client.agents.get(args.agent_id)
-        runs = client.agents.list_runs(args.agent_id)
+        with _open_client(sdk) as client:
+            info = client.agents.get(args.agent_id, api_key=api_key)
+            runs = client.agents.list_runs(
+                args.agent_id,
+                runtime="cloud",
+                api_key=api_key,
+            )
+            items = list(_attr(runs, "items", None) or [])
     except Exception as exc:
         return _fail(f"status lookup failed: {exc}")
     _print_agent_row(info)
-    items = _attr(runs, "items", None) or []
     for run in items[:5]:
         run_id = _attr(run, "id")
         status = _attr(run, "status") or "-"
@@ -329,30 +360,49 @@ def cmd_follow(args) -> int:
         return 1
     try:
         sdk = _get_sdk()
-        client = _launch_client(sdk)
-        runs = client.agents.list_runs(args.agent_id)
-        items = _attr(runs, "items", None) or []
-        if not items:
-            return _fail(f"no runs found for {args.agent_id}")
-        run = client.agents.get_run(_attr(items[0], "id"))
+        with _open_client(sdk) as client:
+            runs = client.agents.list_runs(
+                args.agent_id,
+                runtime="cloud",
+                api_key=api_key,
+            )
+            items = _attr(runs, "items", None) or []
+            if not items:
+                return _fail(f"no runs found for {args.agent_id}")
+            run = client.agents.get_run(
+                _attr(items[0], "id"),
+                {
+                    "runtime": "cloud",
+                    "agent_id": args.agent_id,
+                    "api_key": api_key,
+                },
+            )
+
+            print(f"following {args.agent_id} (Ctrl+C detaches without cancelling)")
+            supports = getattr(run, "supports", None)
+            can_stream = bool(supports("stream")) if callable(supports) else True
+            if can_stream:
+                status = _stream_run(run)
+            else:
+                print(
+                    "(live event replay is unavailable for this detached run; "
+                    "waiting for its terminal result)",
+                    flush=True,
+                )
+                final = run.wait()
+                terminal_text = str(
+                    _attr(final, "result") or _attr(run, "result") or ""
+                )
+                if terminal_text:
+                    print(terminal_text, flush=True)
+                status = str(
+                    _attr(final, "status") or _attr(run, "status") or "finished"
+                )
     except Exception as exc:
         return _fail(f"follow failed: {exc}")
-    print(f"following {args.agent_id} (Ctrl+C detaches without cancelling)")
-    observe = getattr(run, "observe", None)
-    try:
-        if callable(observe):
-            for event in observe():
-                kind = _attr(event, "kind") or _attr(event, "type") or ""
-                if kind:
-                    print(f"[{kind}]", flush=True)
-            status = str(_attr(run, "status") or "finished")
-        else:
-            status = _stream_run(run)
     except KeyboardInterrupt:
         print("\n(detached — the cloud run keeps going)")
         return 0
-    except Exception as exc:
-        return _fail(f"stream failed: {exc}")
     print(f"run status: {status}")
     return 0
 
@@ -363,16 +413,17 @@ def cmd_send(args) -> int:
         return 1
     try:
         sdk = _get_sdk()
-        client = _launch_client(sdk)
-        agent = client.agents.resume(args.agent_id, {"api_key": api_key})
-        run = agent.send(args.prompt)
+        with _open_client(sdk) as client:
+            agent = client.agents.resume(args.agent_id, {"api_key": api_key})
+            run = agent.send(args.prompt)
+            run_id = _attr(run, "id")
+            follow_status = _stream_run(run) if args.follow else None
     except Exception as exc:
         return _fail(f"send failed: {exc}")
-    if args.follow:
-        status = _stream_run(run)
-        print(f"run status: {status}")
+    if follow_status is not None:
+        print(f"run status: {follow_status}")
     else:
-        print(f"✓ follow-up sent to {args.agent_id} (run {_attr(run, 'id')})")
+        print(f"✓ follow-up sent to {args.agent_id} (run {run_id})")
         print(f"  follow: hermes cursor follow {args.agent_id}")
     return 0
 
@@ -383,17 +434,34 @@ def cmd_cancel(args) -> int:
         return 1
     try:
         sdk = _get_sdk()
-        client = _launch_client(sdk)
-        runs = client.agents.list_runs(args.agent_id)
-        items = _attr(runs, "items", None) or []
-        active = next(
-            (r for r in items if str(_attr(r, "status")).lower() == "running"), None
-        )
-        if active is None:
-            print("no running run to cancel")
-            return 0
-        run = client.agents.get_run(_attr(active, "id"))
-        run.cancel()
+        with _open_client(sdk) as client:
+            runs = client.agents.list_runs(
+                args.agent_id,
+                runtime="cloud",
+                api_key=api_key,
+            )
+            items = _attr(runs, "items", None) or []
+            active = next(
+                (
+                    run
+                    for run in items
+                    if str(_attr(run, "status")).lower()
+                    in {"creating", "running"}
+                ),
+                None,
+            )
+            if active is None:
+                print("no active run to cancel")
+                return 0
+            run = client.agents.get_run(
+                _attr(active, "id"),
+                {
+                    "runtime": "cloud",
+                    "agent_id": args.agent_id,
+                    "api_key": api_key,
+                },
+            )
+            run.cancel()
     except Exception as exc:
         return _fail(f"cancel failed: {exc}")
     print(f"✓ cancelled run {_attr(active, 'id')} on {args.agent_id}")
@@ -406,33 +474,33 @@ def cmd_artifacts(args) -> int:
         return 1
     try:
         sdk = _get_sdk()
-        client = _launch_client(sdk)
-        agent = client.agents.resume(args.agent_id, {"api_key": api_key})
-        artifacts = agent.list_artifacts()
+        with _open_client(sdk) as client:
+            agent = client.agents.resume(args.agent_id, {"api_key": api_key})
+            artifacts = agent.list_artifacts()
+            if not artifacts:
+                print("no artifacts (local agents and repos-only runs produce none)")
+                return 0
+            print(f"Artifacts on {args.agent_id}:")
+            for artifact in artifacts:
+                path = _attr(artifact, "path")
+                size = _attr(artifact, "size_bytes", 0)
+                print(f"  {path}  ({size} bytes)")
+            if args.download:
+                dest_root = Path(args.download).expanduser()
+                dest_root.mkdir(parents=True, exist_ok=True)
+                for artifact in artifacts:
+                    path = str(_attr(artifact, "path"))
+                    try:
+                        content = agent.download_artifact(path)
+                    except Exception as exc:
+                        print(f"  ✗ {path}: {exc}")
+                        continue
+                    target = dest_root / path.lstrip("/")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
+                    print(f"  ✓ downloaded {path} → {target}")
     except Exception as exc:
         return _fail(f"artifact list failed: {exc}")
-    if not artifacts:
-        print("no artifacts (local agents and repos-only runs produce none)")
-        return 0
-    print(f"Artifacts on {args.agent_id}:")
-    for artifact in artifacts:
-        path = _attr(artifact, "path")
-        size = _attr(artifact, "size_bytes", 0)
-        print(f"  {path}  ({size} bytes)")
-    if args.download:
-        dest_root = Path(args.download).expanduser()
-        dest_root.mkdir(parents=True, exist_ok=True)
-        for artifact in artifacts:
-            path = str(_attr(artifact, "path"))
-            try:
-                content = agent.download_artifact(path)
-            except Exception as exc:
-                print(f"  ✗ {path}: {exc}")
-                continue
-            target = dest_root / path.lstrip("/")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
-            print(f"  ✓ downloaded {path} → {target}")
     return 0
 
 
@@ -442,8 +510,11 @@ def _lifecycle(args, verb: str) -> int:
         return 1
     try:
         sdk = _get_sdk()
-        client = _launch_client(sdk)
-        getattr(client.agents, verb)(args.agent_id)
+        with _open_client(sdk) as client:
+            getattr(client.agents, verb)(
+                args.agent_id,
+                {"runtime": "cloud", "api_key": api_key},
+            )
     except Exception as exc:
         return _fail(f"{verb} failed: {exc}")
     print(f"✓ {verb}d {args.agent_id}" if not verb.endswith("e") else f"✓ {verb}d {args.agent_id}")

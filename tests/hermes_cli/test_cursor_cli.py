@@ -18,10 +18,12 @@ import hermes_cli.cursor_cli as cursor_cli
 # ---------------------------------------------------------------------------
 
 class FakeRun:
-    def __init__(self, run_id="run-1", status="running"):
+    def __init__(self, run_id="run-1", status="running", supports_stream=True):
         self.id = run_id
         self.status = status
+        self.result = ""
         self.cancelled = False
+        self.supports_stream = supports_stream
 
     def messages(self):
         yield {"type": "assistant",
@@ -32,6 +34,9 @@ class FakeRun:
 
     def cancel(self):
         self.cancelled = True
+
+    def supports(self, operation):
+        return operation == "stream" and self.supports_stream
 
 
 class FakeAgent:
@@ -59,6 +64,10 @@ class FakeAgentsAPI:
         self.infos = []
         self.runs = []
         self.lifecycle_calls = []
+        self.list_kwargs = []
+        self.get_calls = []
+        self.list_runs_calls = []
+        self.get_run_calls = []
 
     def create(self, **kwargs):
         self.created.append(kwargs)
@@ -68,35 +77,43 @@ class FakeAgentsAPI:
         return self.agent
 
     def list(self, **kwargs):
+        self.list_kwargs.append(kwargs)
         return SimpleNamespace(items=self.infos)
 
-    def get(self, agent_id):
+    def get(self, agent_id, **kwargs):
+        self.get_calls.append((agent_id, kwargs))
         return self.infos[0] if self.infos else SimpleNamespace(
             agent_id=agent_id, status="finished", name="", summary="", archived=False)
 
-    def list_runs(self, agent_id):
+    def list_runs(self, agent_id, **kwargs):
+        self.list_runs_calls.append((agent_id, kwargs))
         return SimpleNamespace(items=self.runs)
 
-    def get_run(self, run_id):
+    def get_run(self, run_id, options=None):
+        self.get_run_calls.append((run_id, options))
         return next(r for r in self.runs if r.id == run_id)
 
-    def archive(self, agent_id):
+    def archive(self, agent_id, options=None):
         self.lifecycle_calls.append(("archive", agent_id))
 
-    def unarchive(self, agent_id):
+    def unarchive(self, agent_id, options=None):
         self.lifecycle_calls.append(("unarchive", agent_id))
 
-    def delete(self, agent_id):
+    def delete(self, agent_id, options=None):
         self.lifecycle_calls.append(("delete", agent_id))
 
 
 class FakeClient:
     def __init__(self):
         self.agents = FakeAgentsAPI()
+        self.closed = False
 
     @classmethod
     def launch_bridge(cls, **kwargs):
         return _CURRENT_CLIENT
+
+    def close(self):
+        self.closed = True
 
 
 _CURRENT_CLIENT = FakeClient()
@@ -225,7 +242,7 @@ class TestRestVerbs:
         assert "CURSOR_API_KEY" in capsys.readouterr().err
 
     def test_me_valid(self, capsys):
-        payload = {"email": "u@example.com", "apiKeyName": "hermes"}
+        payload = {"userEmail": "u@example.com", "apiKeyName": "hermes"}
         with patch.object(cursor_cli.urllib.request, "urlopen",
                           return_value=_FakeRestResponse(json.dumps(payload).encode())):
             rc = cursor_cli.cmd_me(_args(cursor_action="me"))
@@ -283,6 +300,45 @@ class TestSdkVerbs:
             assert cursor_cli.cmd_status(_args(cursor_action="status", agent_id="bc-9")) == 0
         out = capsys.readouterr().out
         assert "bc-9" in out and "running" in out and "run-9" in out
+        assert client.agents.list_kwargs[0] == {
+            "runtime": "cloud",
+            "api_key": "crsr_test",
+        }
+        assert client.agents.get_calls[-1] == (
+            "bc-9",
+            {"api_key": "crsr_test"},
+        )
+        assert client.agents.list_runs_calls[-1] == (
+            "bc-9",
+            {"runtime": "cloud", "api_key": "crsr_test"},
+        )
+        assert client.closed is True
+
+    def test_follow_detached_run_waits_and_prints_result(self, capsys):
+        sdk, client = make_fake_sdk()
+        run = FakeRun("run-detached", status="running", supports_stream=False)
+        client.agents.runs = [run]
+
+        with patch.object(cursor_cli, "_get_sdk", return_value=sdk):
+            rc = cursor_cli.cmd_follow(
+                _args(cursor_action="follow", agent_id="bc-9")
+            )
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "live event replay is unavailable" in out
+        assert "done!" in out
+        assert "run status: finished" in out
+        assert client.agents.get_run_calls == [
+            (
+                "run-detached",
+                {
+                    "runtime": "cloud",
+                    "agent_id": "bc-9",
+                    "api_key": "crsr_test",
+                },
+            )
+        ]
 
     def test_send_and_cancel(self, capsys):
         sdk, client = make_fake_sdk()
@@ -296,6 +352,10 @@ class TestSdkVerbs:
                 cursor_action="cancel", agent_id="bc-1")) == 0
         assert client.agents.agent.sent == ["more"]
         assert active.cancelled is True
+        assert client.agents.list_runs_calls[-1] == (
+            "bc-1",
+            {"runtime": "cloud", "api_key": "crsr_test"},
+        )
 
     def test_artifacts_download(self, tmp_path, capsys):
         sdk, client = make_fake_sdk()
