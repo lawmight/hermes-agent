@@ -6,8 +6,14 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from agent.transports.cursor_bridge import launch_cursor_bridge
-from tools.environments.local import hermes_subprocess_env
+from tools.environments.local import (
+    _make_run_env,
+    _sanitize_subprocess_env,
+    hermes_subprocess_env,
+)
 
 
 def test_bridge_launch_uses_sanitized_environment_and_restores_sdk_hook():
@@ -45,8 +51,33 @@ def test_bridge_launch_uses_sanitized_environment_and_restores_sdk_hook():
 
 
 def test_cursor_browser_session_is_always_stripped(monkeypatch):
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-key")
     monkeypatch.setenv("WorkosCursorSessionToken", "browser-session")
 
     sanitized = hermes_subprocess_env(inherit_credentials=True)
+    terminal_env = _make_run_env({})
+    background_env = _sanitize_subprocess_env(
+        {
+            "CURSOR_API_KEY": "cursor-key",
+            "WorkosCursorSessionToken": "browser-session",
+        }
+    )
 
+    assert "CURSOR_API_KEY" not in sanitized
     assert "WorkosCursorSessionToken" not in sanitized
+    assert "CURSOR_API_KEY" not in terminal_env
+    assert "WorkosCursorSessionToken" not in terminal_env
+    assert "CURSOR_API_KEY" not in background_env
+    assert "WorkosCursorSessionToken" not in background_env
+
+
+def test_real_sdk_name_fails_closed_without_environment_hook():
+    sdk = SimpleNamespace(
+        __name__="cursor_sdk",
+        CursorClient=SimpleNamespace(),
+    )
+    with patch.dict(
+        sys.modules,
+        {"cursor_sdk._bridge": SimpleNamespace()},
+    ), pytest.raises(RuntimeError, match="refusing to launch"):
+        launch_cursor_bridge(sdk, workspace="/tmp/project")
