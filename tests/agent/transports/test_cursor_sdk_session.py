@@ -559,6 +559,16 @@ class TestSendRecovery:
 
 
 class TestInterruptAndTimeout:
+    def test_stale_session_interrupt_is_cleared_before_next_turn(self):
+        session, _ = make_session()
+        session.ensure_started()
+        session.request_interrupt()
+
+        result = session.run_turn("next turn")
+
+        assert result.interrupted is False
+        assert result.status == "finished"
+
     def test_interrupt_cancels_blocking_run(self):
         session, _ = make_session()
         session.ensure_started()
@@ -612,3 +622,42 @@ class TestInterruptAndTimeout:
         assert result.should_retire is True
         assert "idle timeout" in (result.error or "")
         assert run.cancel_calls >= 1
+
+    def test_non_draining_cancel_never_enters_unbounded_wait(self, monkeypatch):
+        class NonDrainingRun(FakeRun):
+            def __init__(self):
+                super().__init__()
+                self.wait_calls = 0
+                self.cancel_calls = 0
+                self.status = "running"
+
+            def messages(self):
+                threading.Event().wait()
+                yield None
+
+            def cancel(self):
+                self.cancel_calls += 1
+
+            def wait(self):
+                self.wait_calls += 1
+                threading.Event().wait()
+
+        session, _ = make_session(config={"timeout_seconds": 1})
+        monkeypatch.setattr(session_mod, "_CANCEL_DRAIN_SECONDS", 0.1)
+        monkeypatch.setattr(session_mod, "_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(
+            CursorSDKSession, "timeout_seconds",
+            property(lambda self: 0.05),
+        )
+        session.ensure_started()
+        run = NonDrainingRun()
+        session._agent.queue_run(run)
+
+        start = time.monotonic()
+        result = session.run_turn("never drains")
+
+        assert time.monotonic() - start < 2
+        assert result.should_retire is True
+        assert "idle timeout" in (result.error or "")
+        assert run.cancel_calls == 1
+        assert run.wait_calls == 0

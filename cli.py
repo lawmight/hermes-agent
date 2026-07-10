@@ -12495,7 +12495,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # Handle failed or partial results (e.g., non-retryable errors, rate limits,
             # truncated output, invalid tool calls). Both "failed" and "partial" with
             # an empty final_response mean the agent couldn't produce a usable answer.
-            if result and (result.get("failed") or result.get("partial")) and not response:
+            if (
+                result
+                and (result.get("failed") or result.get("partial"))
+                and not result.get("interrupted")
+                and not response
+            ):
                 error_detail = result.get("error", "Unknown error")
                 response = f"Error: {error_detail}"
                 # Stop continuous voice mode on persistent errors (e.g. 429 rate limit)

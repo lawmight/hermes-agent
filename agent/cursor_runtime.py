@@ -266,6 +266,24 @@ def _build_cursor_session(agent, effective_task_id: str):
     )
 
 
+def _finalize_cursor_result(agent, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Restore the per-turn state normally cleared by ``finalize_turn``.
+
+    Cursor returns early from :mod:`agent.conversation_loop`, so it must
+    explicitly honor the result contract consumed by the CLI and gateway.
+    """
+    if result.get("interrupted") and getattr(agent, "_interrupt_message", None):
+        result["interrupt_message"] = agent._interrupt_message
+
+    pending_steer = agent._drain_pending_steer()
+    if pending_steer:
+        result["pending_steer"] = pending_steer
+
+    agent.clear_interrupt()
+    agent._stream_callback = None
+    return result
+
+
 def run_cursor_agent_turn(
     agent,
     *,
@@ -312,7 +330,7 @@ def run_cursor_agent_turn(
         except Exception:
             pass
         agent._cursor_session = None
-        return {
+        return _finalize_cursor_result(agent, {
             "final_response": (
                 f"Cursor runtime turn failed: {exc}. "
                 "Check `hermes doctor` and your CURSOR_API_KEY, or switch "
@@ -323,7 +341,8 @@ def run_cursor_agent_turn(
             "completed": False,
             "partial": True,
             "error": str(exc),
-        }
+            "interrupted": False,
+        })
 
     # Wedged bridge / expired run / auth failure → retire the session so the
     # next turn starts fresh (mirrors the codex runtime's retire semantics).
@@ -398,13 +417,14 @@ def run_cursor_agent_turn(
         except Exception:
             logger.debug("background review spawn raised", exc_info=True)
 
-    return {
+    return _finalize_cursor_result(agent, {
         "final_response": turn.final_text,
         "messages": messages,
         "api_calls": api_calls,
         "completed": not turn.interrupted and turn.error is None,
         "partial": turn.interrupted or turn.error is not None,
         "error": turn.error,
+        "interrupted": bool(turn.interrupted),
         # Early-return path that bypasses conversation_loop — but the
         # projected assistant/tool rows are flushed above and the user turn
         # was flushed at turn start, so the agent is the sole persister.
@@ -414,4 +434,4 @@ def run_cursor_agent_turn(
         "cursor_agent_id": turn.agent_id,
         "cursor_run_id": turn.run_id,
         **usage_result,
-    }
+    })

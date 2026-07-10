@@ -645,6 +645,12 @@ class CursorSDKSession:
         SDK makes overrides sticky, matching Hermes' own semantics.
         ``images``: list of ``{"data": <b64>, "mime_type": ...}`` mappings.
         """
+        # ``request_interrupt()`` is scoped to the active turn. Without this,
+        # one cancelled run poisons every later run on the reused SDK session.
+        # The parent AIAgent flag is checked separately through
+        # ``interrupt_check`` and remains authoritative for an interrupt that
+        # races with turn startup.
+        self._interrupt_event.clear()
         result = CursorTurnResult()
         try:
             self.ensure_started()
@@ -670,13 +676,18 @@ class CursorSDKSession:
         result.run_id = str(getattr(run, "id", "") or "")
 
         projector = CursorEventProjector()
-        self._consume_stream(run, projector, result)
+        stream_drained = self._consume_stream(run, projector, result)
 
-        # Drain any remaining state + read terminal result fields.
-        try:
-            final = run.wait()
-        except Exception:
-            final = None
+        # ``Run.wait()`` has no timeout and drains the same event stream.
+        # Calling it after our cancel-drain deadline expired can hang forever
+        # while the pump thread is still blocked in ``run.messages()``. Only
+        # ask the SDK for terminal metadata after the stream ended normally.
+        final = None
+        if stream_drained:
+            try:
+                final = run.wait()
+            except Exception:
+                final = None
 
         finalize = projector.finalize()
         result.projected_messages.extend(finalize.messages)
@@ -827,9 +838,14 @@ class CursorSDKSession:
 
     def _consume_stream(
         self, run: Any, projector: CursorEventProjector, result: CursorTurnResult
-    ) -> None:
+    ) -> bool:
         """Pump run.messages() through the projector with interrupt + idle
-        timeout support. Blocking iterator → pump thread + polled queue."""
+        timeout support. Blocking iterator → pump thread + polled queue.
+
+        Returns ``True`` only when the stream iterator drained normally. A
+        ``False`` result means callers must not enter the SDK's unbounded
+        ``run.wait()`` on the same partially-consumed stream.
+        """
         events: "queue.Queue[tuple[str, Any]]" = queue.Queue()
 
         def _pump() -> None:
@@ -863,7 +879,7 @@ class CursorSDKSession:
                 if cancel_requested and cancel_deadline and now > cancel_deadline:
                     # Cancel isn't draining — treat the bridge as wedged.
                     result.should_retire = True
-                    break
+                    return False
                 if not cancel_requested and now > idle_deadline:
                     logger.warning(
                         "cursor run idle for %.0fs — cancelling and retiring the session",
@@ -880,11 +896,11 @@ class CursorSDKSession:
                 continue
 
             if kind == "done":
-                break
+                return True
             if kind == "error":
                 if not result.error:
                     result.error = self._format_error("cursor stream failed", payload)
-                break
+                return False
 
             idle_deadline = time.monotonic() + self.timeout_seconds
             projection = projector.project(payload)

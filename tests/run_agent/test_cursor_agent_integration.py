@@ -179,6 +179,28 @@ class TestRunConversationCursorPath:
         assert result["partial"] is True
         assert "boom" in result["error"]
 
+    def test_interrupted_turn_acknowledges_and_clears_interrupt(self, monkeypatch):
+        def fake_run_turn(self, user_input, **kwargs):
+            return CursorTurnResult(
+                final_text="",
+                interrupted=True,
+                status="cancelled",
+            )
+
+        monkeypatch.setattr(CursorSDKSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(CursorSDKSession, "ensure_started", lambda self: "a")
+        agent = _make_cursor_agent()
+        agent._interrupt_requested = True
+        agent._interrupt_message = "reply exactly NEXT"
+
+        result = agent.run_conversation("long task")
+
+        assert result["interrupted"] is True
+        assert result["partial"] is True
+        assert result["interrupt_message"] == "reply exactly NEXT"
+        assert agent._interrupt_requested is False
+        assert agent._interrupt_message is None
+
     def test_should_retire_drops_session(self, monkeypatch):
         def fake_run_turn(self, user_input, **kwargs):
             return CursorTurnResult(
