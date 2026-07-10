@@ -3824,6 +3824,72 @@ def validate_requested_model(
             "message": "Model names cannot contain spaces.",
         }
 
+    if normalized == "cursor":
+        # Cursor's catalog is a Cloud Agents API shape, not OpenAI's
+        # ``{"data": [...]}``, so the generic /models validator below sees an
+        # empty catalog. Import lazily to avoid the provider-discovery cycle:
+        # some provider plugins import this module while registering.
+        try:
+            from providers import get_provider_profile
+
+            profile = get_provider_profile("cursor")
+            live_models = (
+                profile.fetch_models(
+                    api_key=api_key,
+                    base_url=base_url or None,
+                )
+                if profile is not None and api_key
+                else None
+            )
+        except Exception:
+            profile = None
+            live_models = None
+
+        catalog_models = list(
+            live_models or _PROVIDER_MODELS.get("cursor", [])
+        )
+        resolved_model = (
+            profile.resolve_model_id(requested_for_lookup)
+            if profile is not None and hasattr(profile, "resolve_model_id")
+            else None
+        )
+        resolved_model = resolved_model or requested_for_lookup
+
+        if resolved_model in set(catalog_models):
+            result = {
+                "accepted": True,
+                "persist": True,
+                "recognized": True,
+                "message": None,
+            }
+            if resolved_model != requested_for_lookup:
+                result["corrected_model"] = resolved_model
+                result["message"] = (
+                    f"Resolved Cursor model alias `{requested}` → `{resolved_model}`"
+                )
+            return result
+
+        suggestions = get_close_matches(
+            requested_for_lookup,
+            catalog_models,
+            n=3,
+            cutoff=0.5,
+        )
+        suggestion_text = ""
+        if suggestions:
+            suggestion_text = "\n  Similar models: " + ", ".join(
+                f"`{model}`" for model in suggestions
+            )
+        return {
+            "accepted": False,
+            "persist": False,
+            "recognized": False,
+            "message": (
+                f"Model `{requested}` was not found in Cursor's model listing."
+                f"{suggestion_text}"
+            ),
+        }
+
     if normalized == "lmstudio":
         from hermes_cli.auth import AuthError
         # Use probe_lmstudio_models so we can distinguish None (unreachable

@@ -36,6 +36,16 @@ class TestProfileRegistration:
             resolved = get_provider_profile(alias)
             assert resolved is not None and resolved.name == "cursor"
 
+    def test_shared_cli_provider_resolver_sees_plugin_profile(self):
+        from hermes_cli.providers import determine_api_mode, resolve_provider_full
+
+        for name in ("cursor", "cursor-sdk", "composer"):
+            resolved = resolve_provider_full(name)
+            assert resolved is not None
+            assert resolved.id == "cursor"
+            assert resolved.source == "plugin"
+        assert determine_api_mode("cursor") == "cursor_agent"
+
     def test_registry_auto_sync(self):
         from hermes_cli.auth import PROVIDER_REGISTRY, resolve_provider
 
@@ -154,6 +164,35 @@ class TestModelCatalogFetch:
         ):
             ids = profile.fetch_models(api_key="k")
         assert ids == ["composer-2.5", "grok-4.5"]
+
+    def test_model_validation_uses_cursor_catalog_and_aliases(self):
+        from hermes_cli.models import validate_requested_model
+
+        payload = {"items": [
+            {"id": "composer-2.5", "aliases": ["composer"]},
+            {"id": "claude-fable-5", "aliases": ["fable"]},
+        ]}
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self._Response(json.dumps(payload).encode()),
+        ):
+            exact = validate_requested_model(
+                "composer-2.5",
+                "cursor",
+                api_key="k",
+                base_url="https://api.cursor.com",
+            )
+            alias = validate_requested_model(
+                "fable",
+                "cursor",
+                api_key="k",
+                base_url="https://api.cursor.com",
+            )
+
+        assert exact["accepted"] is True
+        assert exact["recognized"] is True
+        assert alias["accepted"] is True
+        assert alias["corrected_model"] == "claude-fable-5"
 
     def test_fetch_models_tolerates_legacy_v0_shape(self):
         from providers import get_provider_profile

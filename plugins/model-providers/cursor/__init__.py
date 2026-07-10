@@ -44,6 +44,21 @@ LAST_MODEL_CATALOG: dict[str, dict] = {}
 class CursorProfile(ProviderProfile):
     """Cursor — agent-harness provider driven via the official cursor-sdk."""
 
+    def resolve_model_id(self, value: str) -> str | None:
+        """Resolve a live catalog id or alias to its canonical model id."""
+        candidate = str(value or "").strip().lower()
+        if not candidate:
+            return None
+        for model_id, item in LAST_MODEL_CATALOG.items():
+            if model_id.lower() == candidate:
+                return model_id
+            aliases = item.get("aliases") if isinstance(item, dict) else None
+            if isinstance(aliases, list) and any(
+                str(alias).strip().lower() == candidate for alias in aliases
+            ):
+                return model_id
+        return None
+
     def fetch_models(
         self,
         *,
