@@ -210,6 +210,28 @@ model:
 | `HERMES_COPILOT_ACP_COMMAND` | Override the Copilot CLI binary path (default: `copilot`) |
 | `HERMES_COPILOT_ACP_ARGS` | Override ACP args (default: `--acp --stdio`) |
 
+### Cursor (Composer via subscription)
+
+**`cursor` — Cursor agent runtime (official cursor-sdk)**. Runs turns through the same agent that powers the Cursor IDE/CLI, billed against your Cursor subscription. Composer plus Cursor-routed frontier models behind one key:
+
+```bash
+hermes chat --provider cursor --model composer-2.5
+# Requires CURSOR_API_KEY (Cursor Dashboard → Integrations → API Keys)
+```
+
+**Permanent config:**
+```yaml
+model:
+  provider: "cursor"
+  default: "composer-2.5"
+```
+
+| Environment variable | Description |
+|---------------------|-------------|
+| `CURSOR_API_KEY` | Cursor API key (user or service-account; Team Admin keys unsupported) |
+
+Cursor is an **agent harness, not a raw completions endpoint** — the cursor agent owns the turn's tool loop while Hermes keeps sessions, memory, skills, and the gateway, and injects its own tools into cursor turns. Runtime knobs live under `cursor:` in config.yaml; cloud agents are managed with `hermes cursor`. Full docs: [Cursor Provider](/user-guide/features/cursor-agent-runtime).
+
 ### First-Class API-Key Providers
 
 These providers have built-in support with dedicated provider IDs. Set the API key and use `--provider` to select:

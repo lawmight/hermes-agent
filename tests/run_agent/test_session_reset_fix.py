@@ -118,3 +118,15 @@ class TestResetSessionState:
         agent.reset_session_state()
 
         assert agent._user_turn_count == 0
+
+    def test_reset_closes_external_runtime_conversation(self):
+        """A fresh Hermes session must not reuse an external hidden transcript."""
+        agent = _make_minimal_agent()
+        cursor_session = types.SimpleNamespace(closed=False)
+        cursor_session.close = lambda: setattr(cursor_session, "closed", True)
+        agent._cursor_session = cursor_session
+
+        agent.reset_session_state()
+
+        assert cursor_session.closed is True
+        assert agent._cursor_session is None

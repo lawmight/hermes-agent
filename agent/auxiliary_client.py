@@ -267,6 +267,9 @@ _PROVIDER_ALIASES = {
     "github-models": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "cursor-sdk": "cursor",
+    "cursor-agent": "cursor",
+    "composer": "cursor",
     "tencent": "tencent-tokenhub",
     "tokenhub": "tencent-tokenhub",
     "tencent-cloud": "tencent-tokenhub",
@@ -4440,6 +4443,20 @@ def resolve_provider_client(
     original_provider = (provider or "").strip().lower()
     # Normalise aliases
     provider = _normalize_aux_provider(provider)
+
+    # Cursor exposes NO chat-completions surface — its only API is the
+    # cursor-sdk agent runtime, which cannot serve auxiliary side-LLM calls
+    # (title generation, compression summaries, vision, embeddings, ...).
+    # Returning (None, None) here makes _resolve_auto's Step-1 fall through
+    # to the configured fallback chain / aggregators instead of building an
+    # OpenAI client against https://api.cursor.com that would 404 at call
+    # time. Same class of guard the MoA virtual provider needs.
+    if provider == "cursor":
+        logger.debug(
+            "Auxiliary tasks cannot run on the cursor agent runtime; "
+            "falling through to the auxiliary fallback chain"
+        )
+        return None, None
 
     # Universal model-resolution fallback chain.  Callers (notably title
     # generation, vision, session search, and other auxiliary tasks) can

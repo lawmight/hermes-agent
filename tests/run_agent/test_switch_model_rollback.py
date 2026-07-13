@@ -202,3 +202,51 @@ def test_successful_switch_still_works_after_rollback_refactor():
     assert agent.provider == "openrouter"
     assert agent.api_key == "or-key-new"
     assert agent.client is new_client
+
+
+def test_switch_to_cursor_does_not_build_openai_client():
+    agent = _make_agent_openrouter()
+    agent._create_openai_client = MagicMock(
+        side_effect=AssertionError("cursor runtime must not build OpenAI client")
+    )
+
+    with patch("hermes_cli.timeouts.get_provider_request_timeout", return_value=None):
+        agent.switch_model(
+            new_model="composer-2.5",
+            new_provider="cursor",
+            api_key="crsr-new",
+            base_url="https://api.cursor.com",
+            api_mode="cursor_agent",
+        )
+
+    assert agent.provider == "cursor"
+    assert agent.api_mode == "cursor_agent"
+    assert agent.client is None
+    agent._create_openai_client.assert_not_called()
+
+
+def test_switch_away_from_cursor_closes_sdk_session():
+    agent = _make_agent_openrouter()
+    session = MagicMock()
+    agent.provider = "cursor"
+    agent.model = "composer-2.5"
+    agent.base_url = "https://api.cursor.com"
+    agent.api_key = "crsr-old"
+    agent.api_mode = "cursor_agent"
+    agent.client = None
+    agent._cursor_session = session
+    new_client = MagicMock(name="NewOpenRouterClient")
+    agent._create_openai_client = MagicMock(return_value=new_client)
+
+    with patch("hermes_cli.timeouts.get_provider_request_timeout", return_value=None):
+        agent.switch_model(
+            new_model="x-ai/grok-4",
+            new_provider="openrouter",
+            api_key="or-new",
+            base_url="https://openrouter.ai/api/v1",
+            api_mode="chat_completions",
+        )
+
+    session.close.assert_called_once_with()
+    assert agent._cursor_session is None
+    assert agent.client is new_client

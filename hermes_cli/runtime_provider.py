@@ -346,6 +346,11 @@ _VALID_API_MODES = {
     # `model.openai_runtime == "codex_app_server"` AND provider in
     # {"openai", "openai-codex"}. Default is unchanged.
     "codex_app_server",
+    # Cursor agent runtime (official cursor-sdk). Unlike codex_app_server
+    # there is no toggle: Cursor exposes no raw chat-completions endpoint,
+    # so provider == "cursor" ALWAYS implies this mode. See
+    # agent/cursor_runtime.py.
+    "cursor_agent",
 }
 
 
@@ -445,6 +450,12 @@ def _resolve_runtime_from_pool_entry(
         base_url = base_url or OPENROUTER_BASE_URL
     elif provider == "xai":
         api_mode = "codex_responses"
+    elif provider == "cursor":
+        # Cursor has no chat-completions surface — always the SDK runtime.
+        # Never honor a stale persisted model.api_mode here.
+        api_mode = "cursor_agent"
+        pconfig = PROVIDER_REGISTRY.get(provider)
+        base_url = base_url or (pconfig.inference_base_url if pconfig else "")
     elif provider == "nous":
         api_mode = "chat_completions"
         base_url = _nous_inference_base_url_override() or base_url
@@ -1489,6 +1500,9 @@ def _resolve_explicit_runtime(
             api_mode = _copilot_runtime_api_mode(model_cfg, api_key)
         elif provider == "xai":
             api_mode = "codex_responses"
+        elif provider == "cursor":
+            # Cursor has no chat-completions surface — always the SDK runtime.
+            api_mode = "cursor_agent"
         else:
             configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
             if configured_mode:
@@ -2035,6 +2049,9 @@ def resolve_runtime_provider(
             api_mode = _copilot_runtime_api_mode(model_cfg, creds.get("api_key", ""))
         elif provider == "xai":
             api_mode = "codex_responses"
+        elif provider == "cursor":
+            # Cursor has no chat-completions surface — always the SDK runtime.
+            api_mode = "cursor_agent"
         else:
             configured_provider = str(model_cfg.get("provider") or "").strip().lower()
             # Only honor persisted api_mode when it belongs to the same provider family.
