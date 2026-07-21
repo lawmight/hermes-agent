@@ -1,0 +1,251 @@
+# Sync this fork with NousResearch/hermes-agent (upstream).
+#
+# Runs on a schedule and on manual dispatch. Uses a merge (not reset) so
+# fork-local commits are preserved. Opens or updates a PR when upstream
+# has moved; optional push-to-main for set-and-forget updates when the
+# merge is clean.
+#
+# Optional repo secret:
+#   UPSTREAM_SYNC_TOKEN — PAT (or fine-grained token) with contents +
+#   pull-requests write. When set, sync PRs can trigger other workflows
+#   (GITHUB_TOKEN-created PRs do not). Without it, github.token is used.
+
+name: Sync upstream
+
+on:
+  schedule:
+    # Daily 06:15 UTC — offset from the hour to avoid thundering herds.
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "How to land a clean merge"
+        type: choice
+        options:
+          - pull_request
+          - push_to_main
+        default: pull_request
+      force_pr_on_conflict:
+        description: "Open a conflict-marker PR when merge fails (for manual resolution)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # Only meaningful on forks of NousResearch/hermes-agent.
+    if: github.event.repository.fork == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      UPSTREAM_REPO: NousResearch/hermes-agent
+      UPSTREAM_BRANCH: main
+      SYNC_BRANCH: sync/upstream-main
+      # Prefer a dedicated PAT so opened PRs still run CI; fall back to GITHUB_TOKEN.
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null \
+            || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags origin "${{ github.event.repository.default_branch }}"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+
+      - name: Measure drift
+        id: drift
+        run: |
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          BEHIND=$(git rev-list --count "origin/${DEFAULT_BRANCH}..upstream/${UPSTREAM_BRANCH}")
+          AHEAD=$(git rev-list --count "upstream/${UPSTREAM_BRANCH}..origin/${DEFAULT_BRANCH}")
+          UPSTREAM_SHA=$(git rev-parse --short "upstream/${UPSTREAM_BRANCH}")
+          echo "behind=${BEHIND}" >> "$GITHUB_OUTPUT"
+          echo "ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "default_branch=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "Fork is ${BEHIND} commit(s) behind and ${AHEAD} commit(s) ahead of upstream/${UPSTREAM_BRANCH} (${UPSTREAM_SHA})."
+
+      - name: Skip when already up to date
+        if: steps.drift.outputs.behind == '0'
+        run: echo "Already up to date with upstream/${UPSTREAM_BRANCH}; nothing to do."
+
+      - name: Merge upstream into sync branch
+        id: merge
+        if: steps.drift.outputs.behind != '0'
+        run: |
+          DEFAULT_BRANCH="${{ steps.drift.outputs.default_branch }}"
+          git checkout -B "${SYNC_BRANCH}" "origin/${DEFAULT_BRANCH}"
+
+          set +e
+          git merge "upstream/${UPSTREAM_BRANCH}" --no-edit \
+            -m "Merge upstream/${UPSTREAM_BRANCH} from ${UPSTREAM_REPO}
+
+          Automated sync: ${{ steps.drift.outputs.behind }} commit(s) from upstream/${UPSTREAM_BRANCH} (${{ steps.drift.outputs.upstream_sha }})."
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+            echo "Merge completed cleanly."
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            echo "Merge has conflicts."
+            if [ "${{ github.event_name == 'workflow_dispatch' && inputs.force_pr_on_conflict }}" = "true" ]; then
+              # Leave conflict markers in the working tree and commit so a human
+              # can resolve them in the PR UI / locally.
+              git add -A
+              git commit --no-edit -m "WIP: sync upstream/${UPSTREAM_BRANCH} (conflicts — needs manual resolution)" || \
+                git commit -am "WIP: sync upstream/${UPSTREAM_BRANCH} (conflicts — needs manual resolution)"
+              echo "conflict_pr=true" >> "$GITHUB_OUTPUT"
+            else
+              git merge --abort
+              echo "conflict_pr=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Push sync branch
+        id: push
+        if: steps.drift.outputs.behind != '0' && (steps.merge.outputs.clean == 'true' || steps.merge.outputs.conflict_pr == 'true')
+        run: |
+          git push -u origin "${SYNC_BRANCH}" --force-with-lease
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push clean merge directly to default branch
+        id: push_main
+        if: >
+          steps.drift.outputs.behind != '0'
+          && steps.merge.outputs.clean == 'true'
+          && github.event_name == 'workflow_dispatch'
+          && inputs.mode == 'push_to_main'
+        run: |
+          DEFAULT_BRANCH="${{ steps.drift.outputs.default_branch }}"
+          git push origin "${SYNC_BRANCH}:${DEFAULT_BRANCH}"
+          echo "Pushed clean upstream merge directly to origin/${DEFAULT_BRANCH}."
+
+      - name: Open or update sync pull request
+        id: pr
+        if: >
+          steps.drift.outputs.behind != '0'
+          && steps.push.outputs.pushed == 'true'
+          && (
+            github.event_name != 'workflow_dispatch'
+            || inputs.mode == 'pull_request'
+            || steps.merge.outputs.conflict_pr == 'true'
+          )
+          && !(
+            github.event_name == 'workflow_dispatch'
+            && inputs.mode == 'push_to_main'
+            && steps.merge.outputs.clean == 'true'
+          )
+        env:
+          BEHIND: ${{ steps.drift.outputs.behind }}
+          AHEAD: ${{ steps.drift.outputs.ahead }}
+          UPSTREAM_SHA: ${{ steps.drift.outputs.upstream_sha }}
+          DEFAULT_BRANCH: ${{ steps.drift.outputs.default_branch }}
+          CLEAN: ${{ steps.merge.outputs.clean }}
+        run: |
+          TITLE="chore: sync upstream/${UPSTREAM_BRANCH} (${UPSTREAM_SHA})"
+          if [ "${CLEAN}" = "true" ]; then
+            BODY=$(cat <<EOF
+          ## Upstream sync
+
+          Automated merge of [\`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\`](https://github.com/${UPSTREAM_REPO}/tree/${UPSTREAM_BRANCH}) (\`${UPSTREAM_SHA}\`) into this fork.
+
+          | | |
+          |---|---|
+          | Behind upstream | ${BEHIND} commit(s) |
+          | Ahead of upstream (fork-only) | ${AHEAD} commit(s) |
+          | Merge | clean |
+
+          Fork-local commits are preserved (merge, not reset).
+
+          Merge this PR to update \`${DEFAULT_BRANCH}\`.
+          EOF
+          )
+          else
+            BODY=$(cat <<EOF
+          ## Upstream sync — conflicts need manual resolution
+
+          Attempted to merge [\`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\`](https://github.com/${UPSTREAM_REPO}/tree/${UPSTREAM_BRANCH}) (\`${UPSTREAM_SHA}\`) into this fork.
+
+          | | |
+          |---|---|
+          | Behind upstream | ${BEHIND} commit(s) |
+          | Ahead of upstream (fork-only) | ${AHEAD} commit(s) |
+          | Merge | **conflicts** |
+
+          Conflict markers are in this branch. Resolve them locally:
+
+          \`\`\`bash
+          git fetch origin
+          git checkout ${SYNC_BRANCH}
+          # fix conflicts, then:
+          git add -A
+          git commit -m "Merge upstream/${UPSTREAM_BRANCH} from ${UPSTREAM_REPO}"
+          git push origin ${SYNC_BRANCH}
+          \`\`\`
+          EOF
+          )
+          fi
+
+          # Drop the common leading indent that YAML run: blocks add to heredoc lines.
+          BODY=$(printf '%s\n' "${BODY}" | sed -E 's/^[[:space:]]{2}//')
+
+          EXISTING=$(gh pr list --head "${SYNC_BRANCH}" --base "${DEFAULT_BRANCH}" --state open --json number --jq '.[0].number // empty')
+          if [ -n "${EXISTING}" ]; then
+            gh pr edit "${EXISTING}" --title "${TITLE}" --body "${BODY}"
+            echo "Updated existing PR #${EXISTING}."
+            echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
+          else
+            URL=$(gh pr create --base "${DEFAULT_BRANCH}" --head "${SYNC_BRANCH}" --title "${TITLE}" --body "${BODY}")
+            echo "Opened ${URL}"
+            echo "pr_url=${URL}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail clearly when merge conflicts (no conflict PR)
+        if: >
+          steps.drift.outputs.behind != '0'
+          && steps.merge.outputs.clean == 'false'
+          && steps.merge.outputs.conflict_pr != 'true'
+        env:
+          BEHIND: ${{ steps.drift.outputs.behind }}
+          UPSTREAM_SHA: ${{ steps.drift.outputs.upstream_sha }}
+          DEFAULT_BRANCH: ${{ steps.drift.outputs.default_branch }}
+        run: |
+          {
+            echo "## Upstream sync blocked by merge conflicts"
+            echo ""
+            echo "- Behind upstream: **${BEHIND}** commit(s)"
+            echo "- Upstream tip: \`${UPSTREAM_SHA}\`"
+            echo "- Upstream: https://github.com/${UPSTREAM_REPO}/tree/${UPSTREAM_BRANCH}"
+            echo ""
+            echo "Resolve locally:"
+            echo ""
+            echo '```bash'
+            echo "git fetch https://github.com/${UPSTREAM_REPO}.git ${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+            echo "git checkout ${DEFAULT_BRANCH}"
+            echo "git merge upstream/${UPSTREAM_BRANCH}"
+            echo "# fix conflicts, commit, push"
+            echo '```'
+            echo ""
+            echo "Or re-run **Sync upstream** with \`force_pr_on_conflict=true\` to open a WIP PR containing conflict markers."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Upstream sync conflicts::Fork is ${BEHIND} commit(s) behind upstream/${UPSTREAM_BRANCH} (${UPSTREAM_SHA}) and the merge has conflicts. See the job summary for resolve steps."
+          exit 1
