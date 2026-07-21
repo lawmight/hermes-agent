@@ -1436,3 +1436,32 @@ signal to do the extraction, not to regex around it.
 
 - On **Windows**, when creating folders under the user Hermes home from copy-paste snippets, use **`%USERPROFILE%\.hermes\...`** in **cmd** and **`$env:USERPROFILE\.hermes\...`** (or `Join-Path`) in **PowerShell**. Using PowerShell-style `$env:` variables in cmd creates a literal bad path (Windows rejects the folder name).
 - **Cursor:** running **`hermes` from Cursor’s integrated terminal** is the same as any local shell workflow (activate the repo `.venv`, then invoke `hermes`). **ACP** (`hermes acp`) is documented for VS Code, Zed, and JetBrains; treat **Cursor + ACP** as try-and-verify unless your ACP client explicitly supports Cursor.
+
+## Cursor Cloud specific instructions
+
+Environment refresh (venv + Python deps + npm workspaces) is handled by the
+Cloud Agent startup script; you do not need to reinstall by hand. `uv` lives at
+`~/.local/bin/uv`. Activate the Python env with `source .venv/bin/activate`
+before running `hermes`, `ruff`, or `scripts/run_tests.sh`. Standard commands
+are already documented above and in `CONTRIBUTING.md` — reference those.
+
+- **No LLM provider key is present by default.** `~/.hermes/.env` ships empty,
+  so real chats fail until a credential (e.g. `OPENROUTER_API_KEY`) is added to
+  `~/.hermes/.env`. The injected `GITHUB_TOKEN` does **not** grant GitHub
+  Models / Copilot access (both 403/404). To exercise the full agent loop
+  without a paid key, point a `custom` provider at a local OpenAI-compatible
+  server: set `model.provider: custom`, `model.base_url`, and `model.api_key`
+  in `~/.hermes/config.yaml`, then `hermes chat -q "..." -t terminal --yolo`
+  (`--yolo` skips the interactive approval prompt so a tool call can run
+  non-interactively).
+- **Two test failures under `scripts/run_tests.sh` are environmental, not
+  regressions.** This VM is a container (`/.dockerenv` present), so
+  `is_container()` is true and `get_subprocess_home()` forces the profile HOME —
+  `tests/agent/test_copilot_acp_client.py::test_run_prompt_preserves_real_home_when_profile_home_available`
+  asserts the real HOME and therefore fails here (it passes on bare-metal
+  hosts). Separately, the mtime-based cache test in
+  `tests/agent/test_skill_utils.py` can flake on fast disks but passes in
+  isolation. Neither indicates a broken setup.
+- **JS/TS surfaces (TUI, web, desktop) are optional.** Root `npm install`
+  provisions all workspaces; `cd ui-tui && npm run typecheck` is a quick way to
+  confirm the JS toolchain. The core product is the Python `hermes` CLI.
