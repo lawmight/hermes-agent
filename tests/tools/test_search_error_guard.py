@@ -159,7 +159,10 @@ class TestSearchContentNewlineWarning:
         assert res.total_count == 0
         assert res.warning is not None
 
-    def test_search_with_matching_alternative_and_regex_newline_warns(self, match_tree):
+    def test_search_with_matching_alternative_and_regex_newline_keeps_matches(self, match_tree):
+        # A newline escape in an unused alternative must not suppress matches
+        # from a working alternative, and the zero-result newline warning only
+        # applies when search finds nothing usable.
         res = _ops(match_tree).search(
             r"needle|absent\npattern",
             path=str(match_tree),
@@ -167,8 +170,8 @@ class TestSearchContentNewlineWarning:
         )
 
         assert res.error is None
-        assert res.total_count == 0
-        assert res.warning is not None
+        assert res.total_count == 5
+        assert res.warning is None
 
     def test_literal_backslash_n_pattern_does_not_warn(self, match_tree):
         res = _ops(match_tree).search(
