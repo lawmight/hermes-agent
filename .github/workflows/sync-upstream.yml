@@ -8,15 +8,15 @@
 # Required repo secret (GITHUB_TOKEN cannot update workflow files):
 #   UPSTREAM_SYNC_TOKEN — PAT (classic or fine-grained) with:
 #     - contents: read/write
-#     - pull-requests: read/write
 #     - workflows: read/write   ← required whenever upstream touches
 #       `.github/workflows/*`; without it the push is rejected with
 #       "refusing to allow a GitHub App to create or update workflow"
+#     - pull-requests: read/write (optional but preferred so `gh pr`
+#       runs as the PAT; otherwise the job falls back to GITHUB_TOKEN
+#       for PR create/edit)
 #   Classic PAT: `repo` + `workflow` scopes.
-#   Fine-grained: Contents, Pull requests, and Workflows (Read and write)
-#   on this fork.
-#   When set, sync PRs can also trigger other workflows (GITHUB_TOKEN-
-#   created PRs do not).
+#   Fine-grained: Contents + Workflows (Read and write) on this fork;
+#   add Pull requests (Read and write) when possible.
 
 name: Sync upstream
 
@@ -237,6 +237,9 @@ jobs:
           UPSTREAM_SHA: ${{ steps.drift.outputs.upstream_sha }}
           DEFAULT_BRANCH: ${{ steps.drift.outputs.default_branch }}
           CLEAN: ${{ steps.merge.outputs.clean }}
+          # Keep the Actions-provided token for gh pr fallback when the
+          # sync PAT lacks pull-requests write.
+          ACTIONS_GITHUB_TOKEN: ${{ github.token }}
         run: |
           TITLE="chore: sync upstream/${UPSTREAM_BRANCH} (${UPSTREAM_SHA})"
           if [ "${CLEAN}" = "true" ]; then
@@ -285,13 +288,34 @@ jobs:
           # Drop the common leading indent that YAML run: blocks add to heredoc lines.
           BODY=$(printf '%s\n' "${BODY}" | sed -E 's/^[[:space:]]{2}//')
 
-          EXISTING=$(gh pr list --head "${SYNC_BRANCH}" --base "${DEFAULT_BRANCH}" --state open --json number --jq '.[0].number // empty')
+          # Prefer UPSTREAM_SYNC_TOKEN (GH_TOKEN) for PR ops; if the PAT
+          # lacks pull-requests write, retry with the workflow GITHUB_TOKEN.
+          gh_pr() {
+            local out status
+            set +e
+            out=$(gh "$@" 2>&1)
+            status=$?
+            set -e
+            if [ "${status}" -eq 0 ]; then
+              printf '%s\n' "${out}"
+              return 0
+            fi
+            if printf '%s\n' "${out}" | grep -qiE 'Resource not accessible by personal access token|HTTP 403'; then
+              echo "PAT cannot perform: gh $* — retrying with GITHUB_TOKEN" >&2
+              GH_TOKEN="${ACTIONS_GITHUB_TOKEN}" gh "$@"
+              return $?
+            fi
+            printf '%s\n' "${out}" >&2
+            return "${status}"
+          }
+
+          EXISTING=$(gh_pr pr list --head "${SYNC_BRANCH}" --base "${DEFAULT_BRANCH}" --state open --json number --jq '.[0].number // empty')
           if [ -n "${EXISTING}" ]; then
-            gh pr edit "${EXISTING}" --title "${TITLE}" --body "${BODY}"
+            gh_pr pr edit "${EXISTING}" --title "${TITLE}" --body "${BODY}" >/dev/null
             echo "Updated existing PR #${EXISTING}."
             echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
           else
-            URL=$(gh pr create --base "${DEFAULT_BRANCH}" --head "${SYNC_BRANCH}" --title "${TITLE}" --body "${BODY}")
+            URL=$(gh_pr pr create --base "${DEFAULT_BRANCH}" --head "${SYNC_BRANCH}" --title "${TITLE}" --body "${BODY}")
             echo "Opened ${URL}"
             echo "pr_url=${URL}" >> "$GITHUB_OUTPUT"
           fi
