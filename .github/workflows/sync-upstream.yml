@@ -34,9 +34,9 @@ on:
         description: "How to land a clean merge"
         type: choice
         options:
-          - pull_request
           - push_to_main
-        default: pull_request
+          - pull_request
+        default: push_to_main
       force_pr_on_conflict:
         description: "Open a conflict-marker PR when merge fails (for manual resolution)"
         type: boolean
@@ -297,16 +297,52 @@ jobs:
           # Drop the common leading indent that YAML run: blocks add to heredoc lines.
           BODY=$(printf '%s\n' "${BODY}" | sed -E 's/^[[:space:]]{2}//')
 
+          # Prefer REST over gh's GraphQL helpers — some fork/token combos
+          # can list pulls but still 403 on updatePullRequest/createPullRequest.
           EXISTING=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${SYNC_BRANCH}&state=open" --jq '.[0].number // empty')
+
+          set +e
           if [ -n "${EXISTING}" ]; then
-            gh pr edit "${EXISTING}" --title "${TITLE}" --body "${BODY}"
-            echo "Updated existing PR #${EXISTING}."
-            echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
+            RESP=$(gh api -X PATCH "repos/${GITHUB_REPOSITORY}/pulls/${EXISTING}" \
+              -f title="${TITLE}" -f body="${BODY}" 2>&1)
+            STATUS=$?
           else
-            URL=$(gh pr create --base "${DEFAULT_BRANCH}" --head "${SYNC_BRANCH}" --title "${TITLE}" --body "${BODY}")
-            echo "Opened ${URL}"
-            echo "pr_url=${URL}" >> "$GITHUB_OUTPUT"
+            RESP=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/pulls" \
+              -f title="${TITLE}" -f head="${SYNC_BRANCH}" -f base="${DEFAULT_BRANCH}" \
+              -f body="${BODY}" 2>&1)
+            STATUS=$?
           fi
+          set -e
+
+          if [ "${STATUS}" -eq 0 ]; then
+            if [ -n "${EXISTING}" ]; then
+              echo "Updated existing PR #${EXISTING}."
+              echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
+            else
+              URL=$(printf '%s\n' "${RESP}" | jq -r .html_url)
+              echo "Opened ${URL}"
+              echo "pr_url=${URL}" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # Branch is already on the remote; don't fail the whole sync when
+          # this fork's tokens cannot mutate pull requests.
+          {
+            echo "## Sync branch pushed; PR create/update blocked"
+            echo ""
+            echo "\`origin/${SYNC_BRANCH}\` was updated, but opening/editing the"
+            echo "sync PR failed with this token:"
+            echo ""
+            echo '```'
+            printf '%s\n' "${RESP}"
+            echo '```'
+            echo ""
+            echo "Open or refresh the PR manually, or re-run with"
+            echo "\`mode=push_to_main\` (the scheduled path) to land on \`${DEFAULT_BRANCH}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=PR create/update blocked::Sync branch pushed, but PR mutation failed. Use mode=push_to_main or open the PR manually."
+          exit 0
 
       - name: Fail clearly when merge conflicts (no conflict PR)
         if: >
