@@ -1,14 +1,26 @@
 # Sync this fork with NousResearch/hermes-agent (upstream).
 #
 # Runs on a schedule and on manual dispatch. Uses a merge (not reset) so
-# fork-local commits are preserved. Opens or updates a PR when upstream
-# has moved; optional push-to-main for set-and-forget updates when the
-# merge is clean.
+# fork-local commits are preserved.
 #
-# Optional repo secret:
-#   UPSTREAM_SYNC_TOKEN — PAT (or fine-grained token) with contents +
-#   pull-requests write. When set, sync PRs can trigger other workflows
-#   (GITHUB_TOKEN-created PRs do not). Without it, github.token is used.
+# Landing strategy:
+#   - schedule (+ clean merge): push directly to the default branch
+#     (set-and-forget; keeps the fork current)
+#   - workflow_dispatch mode=pull_request: open/update a sync PR
+#   - workflow_dispatch mode=push_to_main: push directly when clean
+#
+# Required repo secret (GITHUB_TOKEN cannot update workflow files):
+#   UPSTREAM_SYNC_TOKEN — PAT (classic or fine-grained) with:
+#     - contents: read/write
+#     - workflows: read/write   ← required whenever upstream touches
+#       `.github/workflows/*`; without it the push is rejected with
+#       "refusing to allow a GitHub App to create or update workflow"
+#     - pull-requests: read/write (optional but preferred so `gh pr`
+#       runs as the PAT; otherwise the job falls back to GITHUB_TOKEN
+#       for PR create/edit)
+#   Classic PAT: `repo` + `workflow` scopes.
+#   Fine-grained: Contents + Workflows (Read and write) on this fork;
+#   add Pull requests (Read and write) when possible.
 
 name: Sync upstream
 
@@ -22,9 +34,9 @@ on:
         description: "How to land a clean merge"
         type: choice
         options:
-          - pull_request
           - push_to_main
-        default: pull_request
+          - pull_request
+        default: push_to_main
       force_pr_on_conflict:
         description: "Open a conflict-marker PR when merge fails (for manual resolution)"
         type: boolean
@@ -48,8 +60,10 @@ jobs:
       UPSTREAM_REPO: NousResearch/hermes-agent
       UPSTREAM_BRANCH: main
       SYNC_BRANCH: sync/upstream-main
-      # Prefer a dedicated PAT so opened PRs still run CI; fall back to GITHUB_TOKEN.
+      # Prefer a dedicated PAT so opened PRs still run CI and so workflow
+      # file updates from upstream can be pushed. Fall back to GITHUB_TOKEN.
       GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+      HAS_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN != '' }}
     steps:
       - name: Checkout fork
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -120,39 +134,110 @@ jobs:
             fi
           fi
 
+      - name: Warn when sync token missing and workflows changed
+        if: >
+          steps.drift.outputs.behind != '0'
+          && (steps.merge.outputs.clean == 'true' || steps.merge.outputs.conflict_pr == 'true')
+          && env.HAS_SYNC_TOKEN != 'true'
+        run: |
+          DEFAULT_BRANCH="${{ steps.drift.outputs.default_branch }}"
+          # Compare the sync tip against origin default for workflow-path churn.
+          if git diff --name-only "origin/${DEFAULT_BRANCH}"...HEAD -- '.github/workflows' | grep -q .; then
+            {
+              echo "## UPSTREAM_SYNC_TOKEN required"
+              echo ""
+              echo "This sync updates files under \`.github/workflows/\`."
+              echo "\`GITHUB_TOKEN\` cannot push those changes."
+              echo ""
+              echo "Add repo secret **UPSTREAM_SYNC_TOKEN** (PAT with Contents,"
+              echo "Pull requests, and **Workflows** read/write), then re-run."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Missing UPSTREAM_SYNC_TOKEN::Sync touches workflow files; GITHUB_TOKEN push will likely be rejected. Set UPSTREAM_SYNC_TOKEN with workflows write permission."
+          fi
+
       - name: Push sync branch
         id: push
         if: steps.drift.outputs.behind != '0' && (steps.merge.outputs.clean == 'true' || steps.merge.outputs.conflict_pr == 'true')
         run: |
-          git push -u origin "${SYNC_BRANCH}" --force-with-lease
-          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          set +e
+          PUSH_OUT=$(git push -u origin "${SYNC_BRANCH}" --force-with-lease 2>&1)
+          PUSH_STATUS=$?
+          set -e
+          printf '%s\n' "${PUSH_OUT}"
+
+          if [ "${PUSH_STATUS}" -eq 0 ]; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if printf '%s\n' "${PUSH_OUT}" | grep -q "without \`workflows\` permission"; then
+            {
+              echo "## Push blocked: workflows permission missing"
+              echo ""
+              echo "GitHub rejected the push because this sync updates"
+              echo "\`.github/workflows/*\` and the token lacks the **workflows** permission."
+              echo ""
+              echo "Fix:"
+              echo "1. Create a PAT with Contents, Pull requests, and Workflows (read/write)"
+              echo "   — classic: \`repo\` + \`workflow\` scopes"
+              echo "2. Store it as repo secret \`UPSTREAM_SYNC_TOKEN\`"
+              echo "3. Re-run **Sync upstream**"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Workflows permission required::Set UPSTREAM_SYNC_TOKEN to a PAT with workflows write permission (upstream changed workflow files)."
+          else
+            echo "::error title=Push failed::git push of ${SYNC_BRANCH} failed."
+          fi
+          exit "${PUSH_STATUS}"
 
       - name: Push clean merge directly to default branch
         id: push_main
         if: >
           steps.drift.outputs.behind != '0'
           && steps.merge.outputs.clean == 'true'
-          && github.event_name == 'workflow_dispatch'
-          && inputs.mode == 'push_to_main'
+          && steps.push.outputs.pushed == 'true'
+          && (
+            github.event_name == 'schedule'
+            || (github.event_name == 'workflow_dispatch' && inputs.mode == 'push_to_main')
+          )
         run: |
           DEFAULT_BRANCH="${{ steps.drift.outputs.default_branch }}"
-          git push origin "${SYNC_BRANCH}:${DEFAULT_BRANCH}"
-          echo "Pushed clean upstream merge directly to origin/${DEFAULT_BRANCH}."
+          set +e
+          PUSH_OUT=$(git push origin "${SYNC_BRANCH}:${DEFAULT_BRANCH}" 2>&1)
+          PUSH_STATUS=$?
+          set -e
+          printf '%s\n' "${PUSH_OUT}"
+
+          if [ "${PUSH_STATUS}" -eq 0 ]; then
+            echo "pushed_main=true" >> "$GITHUB_OUTPUT"
+            echo "Pushed clean upstream merge directly to origin/${DEFAULT_BRANCH}."
+            {
+              echo "## Upstream sync landed on \`${DEFAULT_BRANCH}\`"
+              echo ""
+              echo "Clean merge of \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\` (\`${{ steps.drift.outputs.upstream_sha }}\`) was pushed to \`${DEFAULT_BRANCH}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if printf '%s\n' "${PUSH_OUT}" | grep -q "without \`workflows\` permission"; then
+            {
+              echo "## Push to ${DEFAULT_BRANCH} blocked: workflows permission missing"
+              echo ""
+              echo "Set repo secret \`UPSTREAM_SYNC_TOKEN\` to a PAT with Workflows"
+              echo "read/write, then re-run."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Workflows permission required::Set UPSTREAM_SYNC_TOKEN with workflows write permission."
+          fi
+          exit "${PUSH_STATUS}"
 
       - name: Open or update sync pull request
         id: pr
         if: >
           steps.drift.outputs.behind != '0'
           && steps.push.outputs.pushed == 'true'
+          && steps.push_main.outcome != 'success'
           && (
-            github.event_name != 'workflow_dispatch'
-            || inputs.mode == 'pull_request'
+            (github.event_name == 'workflow_dispatch' && inputs.mode == 'pull_request')
             || steps.merge.outputs.conflict_pr == 'true'
-          )
-          && !(
-            github.event_name == 'workflow_dispatch'
-            && inputs.mode == 'push_to_main'
-            && steps.merge.outputs.clean == 'true'
           )
         env:
           BEHIND: ${{ steps.drift.outputs.behind }}
@@ -160,6 +245,10 @@ jobs:
           UPSTREAM_SHA: ${{ steps.drift.outputs.upstream_sha }}
           DEFAULT_BRANCH: ${{ steps.drift.outputs.default_branch }}
           CLEAN: ${{ steps.merge.outputs.clean }}
+          # Fine-grained sync PATs often lack pull-requests write and can
+          # return empty `gh pr list` results (exit 0). Use the workflow
+          # GITHUB_TOKEN for all PR list/create/edit operations.
+          GH_TOKEN: ${{ github.token }}
         run: |
           TITLE="chore: sync upstream/${UPSTREAM_BRANCH} (${UPSTREAM_SHA})"
           if [ "${CLEAN}" = "true" ]; then
@@ -208,16 +297,52 @@ jobs:
           # Drop the common leading indent that YAML run: blocks add to heredoc lines.
           BODY=$(printf '%s\n' "${BODY}" | sed -E 's/^[[:space:]]{2}//')
 
-          EXISTING=$(gh pr list --head "${SYNC_BRANCH}" --base "${DEFAULT_BRANCH}" --state open --json number --jq '.[0].number // empty')
+          # Prefer REST over gh's GraphQL helpers — some fork/token combos
+          # can list pulls but still 403 on updatePullRequest/createPullRequest.
+          EXISTING=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${SYNC_BRANCH}&state=open" --jq '.[0].number // empty')
+
+          set +e
           if [ -n "${EXISTING}" ]; then
-            gh pr edit "${EXISTING}" --title "${TITLE}" --body "${BODY}"
-            echo "Updated existing PR #${EXISTING}."
-            echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
+            RESP=$(gh api -X PATCH "repos/${GITHUB_REPOSITORY}/pulls/${EXISTING}" \
+              -f title="${TITLE}" -f body="${BODY}" 2>&1)
+            STATUS=$?
           else
-            URL=$(gh pr create --base "${DEFAULT_BRANCH}" --head "${SYNC_BRANCH}" --title "${TITLE}" --body "${BODY}")
-            echo "Opened ${URL}"
-            echo "pr_url=${URL}" >> "$GITHUB_OUTPUT"
+            RESP=$(gh api -X POST "repos/${GITHUB_REPOSITORY}/pulls" \
+              -f title="${TITLE}" -f head="${SYNC_BRANCH}" -f base="${DEFAULT_BRANCH}" \
+              -f body="${BODY}" 2>&1)
+            STATUS=$?
           fi
+          set -e
+
+          if [ "${STATUS}" -eq 0 ]; then
+            if [ -n "${EXISTING}" ]; then
+              echo "Updated existing PR #${EXISTING}."
+              echo "pr_number=${EXISTING}" >> "$GITHUB_OUTPUT"
+            else
+              URL=$(printf '%s\n' "${RESP}" | jq -r .html_url)
+              echo "Opened ${URL}"
+              echo "pr_url=${URL}" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # Branch is already on the remote; don't fail the whole sync when
+          # this fork's tokens cannot mutate pull requests.
+          {
+            echo "## Sync branch pushed; PR create/update blocked"
+            echo ""
+            echo "\`origin/${SYNC_BRANCH}\` was updated, but opening/editing the"
+            echo "sync PR failed with this token:"
+            echo ""
+            echo '```'
+            printf '%s\n' "${RESP}"
+            echo '```'
+            echo ""
+            echo "Open or refresh the PR manually, or re-run with"
+            echo "\`mode=push_to_main\` (the scheduled path) to land on \`${DEFAULT_BRANCH}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=PR create/update blocked::Sync branch pushed, but PR mutation failed. Use mode=push_to_main or open the PR manually."
+          exit 0
 
       - name: Fail clearly when merge conflicts (no conflict PR)
         if: >
