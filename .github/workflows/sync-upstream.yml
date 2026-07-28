@@ -62,16 +62,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: DIAG token shape (no value printed)
+      - name: DIAG token shape + gh api REST PR test (no value printed)
         if: always()
         run: |
           echo "GH_TOKEN length: ${#GH_TOKEN}"
-          echo "GH_TOKEN prefix: ${GH_TOKEN:0:4}"
           echo "starts with github_pat_: $([[ "${GH_TOKEN}" == github_pat_* ]] && echo yes || echo no)"
-          echo "--- gh auth status (which token does gh use?) ---"
-          gh auth status 2>&1 | sed -n '1,12p'
-          echo "--- gh whoami ---"
-          gh api user --jq .login 2>&1
+          gh auth status 2>&1 | sed -n '1,4p'
+          echo "--- TEST gh api REST POST /pulls (same token) ---"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/pulls" -f title="diag-gh-api-rest" -f head="${SYNC_BRANCH}" -f base="${DEFAULT_BRANCH}" -f body="diag" --jq '.number' 2>&1 | head -5 || echo "GH_API_REST_FAILED"
 
       - name: Fetch upstream
         run: |
