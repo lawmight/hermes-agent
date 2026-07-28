@@ -1,0 +1,2 @@
+name: wf perm probe
+on: workflow_dispatch
