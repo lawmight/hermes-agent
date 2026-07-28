@@ -68,6 +68,10 @@ jobs:
           echo "GH_TOKEN length: ${#GH_TOKEN}"
           echo "GH_TOKEN prefix: ${GH_TOKEN:0:4}"
           echo "starts with github_pat_: $([[ "${GH_TOKEN}" == github_pat_* ]] && echo yes || echo no)"
+          echo "--- gh auth status (which token does gh use?) ---"
+          gh auth status 2>&1 | sed -n '1,12p'
+          echo "--- gh whoami ---"
+          gh api user --jq .login 2>&1
 
       - name: Fetch upstream
         run: |
