@@ -155,9 +155,6 @@ jobs:
             && steps.merge.outputs.clean == 'true'
           )
         env:
-          # Override job-level PAT: UPSTREAM_SYNC_TOKEN often has contents:write
-          # for push/CI but lacks pull-requests:write, so gh pr create fails.
-          GH_TOKEN: ${{ github.token }}
           BEHIND: ${{ steps.drift.outputs.behind }}
           AHEAD: ${{ steps.drift.outputs.ahead }}
           UPSTREAM_SHA: ${{ steps.drift.outputs.upstream_sha }}
