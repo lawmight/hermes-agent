@@ -93,6 +93,35 @@ class TestCodexBuildKwargs:
         )
         assert "reasoning" not in kw or kw.get("include") == []
 
+    @pytest.mark.parametrize(
+        "model",
+        ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+    )
+    def test_no_reasoning_effort_for_non_reasoning_openai_models(self, transport, model):
+        """OpenAI 400s on `reasoning.effort` for its non-reasoning families.
+
+        Every api.openai.com request routes through the Responses API, and the
+        curated openai-api catalog offers gpt-4o / gpt-4o-mini / gpt-4.1, so
+        sending the dial made those picks fail on every turn.
+        """
+        kw = transport.build_kwargs(
+            model=model,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            reasoning_config={"enabled": True, "effort": "medium"},
+        )
+        assert "reasoning" not in kw
+
+    @pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.6-sol", "o4-mini", "gpt-5-codex"])
+    def test_reasoning_effort_still_sent_for_reasoning_models(self, transport, model):
+        kw = transport.build_kwargs(
+            model=model,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            reasoning_config={"enabled": True, "effort": "medium"},
+        )
+        assert kw.get("reasoning", {}).get("effort") == "medium"
+
     def test_cache_key_is_content_addressed_not_session_id(self, transport):
         """prompt_cache_key is content-addressed from the static prefix
         (instructions + tools), not the session_id. This keeps recurring cron
