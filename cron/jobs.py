@@ -170,6 +170,11 @@ def use_cron_store(home: Union[str, Path]):
         _cron_store_override.reset(token)
 
 
+def get_cron_dir() -> Path:
+    """Return the cron directory for the active cron store context."""
+    return _current_cron_store().cron_dir
+
+
 def get_cron_output_dir() -> Path:
     """Return the output directory for the active cron store context."""
     return _current_cron_store().output_dir

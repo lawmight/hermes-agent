@@ -19,16 +19,45 @@ from typing import Any, Dict, Iterator, List, Optional
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 
+# Compatibility surface and default-profile fallback. Callers that need a
+# different profile scope it with cron.jobs.use_cron_store() rather than
+# mutating this process-wide.
 EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
+# Import-time snapshot, so a deliberately re-pointed EXECUTIONS_FILE (the
+# documented escape hatch existing tests use) stays distinguishable from the
+# constant merely being stale.
+_IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
 MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
 
 
+def _current_executions_file() -> Path:
+    """Return the ledger path for this execution context's profile.
+
+    The ledger is profile-local, so it must follow the same store the jobs
+    file follows: cron/scheduler_provider.py ticks each served profile inside
+    ``set_hermes_home_override()`` + ``use_cron_store()``, and resolving from
+    the import-time constant instead funnelled every profile's attempts into
+    whichever home happened to be active when this module was first imported.
+    A re-pointed module constant still wins, so callers pinning the path
+    keep working.
+    """
+    if EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE:
+        return EXECUTIONS_FILE
+    try:
+        from cron.jobs import get_cron_dir
+
+        return get_cron_dir() / "executions.db"
+    except Exception:
+        return get_hermes_home().resolve() / "cron" / "executions.db"
+
+
 def _connect() -> sqlite3.Connection:
-    EXECUTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(EXECUTIONS_FILE, timeout=5)
+    path = _current_executions_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(path, timeout=5)
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
