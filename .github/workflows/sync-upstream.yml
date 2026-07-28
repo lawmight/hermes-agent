@@ -62,6 +62,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: DIAG token shape (no value printed)
+        if: always()
+        run: |
+          echo "GH_TOKEN length: ${#GH_TOKEN}"
+          echo "GH_TOKEN prefix: ${GH_TOKEN:0:4}"
+          echo "starts with github_pat_: $([[ "${GH_TOKEN}" == github_pat_* ]] && echo yes || echo no)"
+
       - name: Fetch upstream
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null \
