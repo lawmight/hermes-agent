@@ -49,13 +49,13 @@ jobs:
       UPSTREAM_BRANCH: main
       SYNC_BRANCH: sync/upstream-main
       # Prefer a dedicated PAT so opened PRs still run CI; fall back to GITHUB_TOKEN.
-      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_PAT || github.token }}
     steps:
       - name: Checkout fork
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          token: ${{ secrets.UPSTREAM_SYNC_PAT || github.token }}
 
       - name: Configure git identity
         run: |
