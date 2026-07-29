@@ -2850,10 +2850,69 @@ _MD_EXCESS_NL = re.compile(r'\n{3,}')
 _EMOJI = re.compile(
     '[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D\U000E0020-\U000E007F]+'
 )
+# Dual-document speak-only blocks (Desktop read-aloud + gateway auto-TTS).
+# Prefer <!-- speak -->…<!-- /speak -->; also accept fenced ```speak.
+_SPEAK_COMMENT = re.compile(
+    r'<!--\s*speak\s*-->([\s\S]*?)<!--\s*/\s*speak\s*-->',
+    re.IGNORECASE,
+)
+_SPEAK_FENCE = re.compile(
+    r'^```speak[ \t]*\r?\n([\s\S]*?)^```[ \t]*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _extract_speak_blocks(text: str) -> Optional[str]:
+    """Return joined speak-block inner text, or None to use the full message.
+
+    Empty-only blocks fall through (None) so callers keep full-text sanitize.
+    Multiple blocks are joined in document order with a sentence boundary.
+    """
+    if not text:
+        return None
+
+    hits: list[tuple[int, int, str]] = []
+    for match in _SPEAK_COMMENT.finditer(text):
+        hits.append((match.start(), match.end(), match.group(1) or ''))
+    for match in _SPEAK_FENCE.finditer(text):
+        hits.append((match.start(), match.end(), match.group(1) or ''))
+
+    if not hits:
+        return None
+
+    hits.sort(key=lambda item: item[0])
+    parts = [body.strip() for _, _, body in hits if body and body.strip()]
+    if not parts:
+        return None
+    # Sentence boundary only when the previous part lacks terminal punct.
+    joined = parts[0]
+    for part in parts[1:]:
+        prev = joined.rstrip()
+        sep = ' ' if prev and prev[-1] in '.!?…' else '. '
+        joined = prev + sep + part
+    return joined
+
+
+def _strip_empty_speak_markers(text: str) -> str:
+    """Remove speak marker shells so empty blocks are not spoken as junk."""
+    text = _SPEAK_COMMENT.sub('', text)
+    text = _SPEAK_FENCE.sub('', text)
+    return text
 
 
 def _strip_markdown_for_tts(text: str) -> str:
-    """Remove markdown formatting (and emoji) that shouldn't be spoken aloud."""
+    """Remove markdown formatting (and emoji) that shouldn't be spoken aloud.
+
+    When dual-document speak blocks are present (``<!-- speak -->`` / fenced
+    ``speak``), only those blocks are prepared for TTS.
+    """
+    speak_only = _extract_speak_blocks(text)
+    if speak_only is not None:
+        text = speak_only
+    else:
+        # Fall through: drop empty/unmatched speak shells before sanitizing.
+        text = _strip_empty_speak_markers(text)
+
     text = _MD_CODE_BLOCK.sub(' ', text)
     text = _MD_LINK.sub(r'\1', text)
     text = _MD_URL.sub('', text)

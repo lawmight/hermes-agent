@@ -124,6 +124,37 @@ class TestMarkdownStripping:
         assert "Good luck!" in result
         assert "docs" in result
 
+    def test_speak_comment_block_only(self):
+        text = (
+            "## Long answer\n\n"
+            "| a | b |\n| - | - |\n| 1 | 2 |\n\n"
+            "- bullet one\n- bullet two\n\n"
+            "```python\nprint('nope')\n```\n\n"
+            "<!-- speak -->\n"
+            "Only this recap should be spoken.\n"
+            "<!-- /speak -->\n"
+        )
+        result = _strip_markdown_for_tts(text)
+        assert result == "Only this recap should be spoken."
+        assert "bullet" not in result
+        assert "print" not in result
+
+    def test_speak_fence_block(self):
+        text = "Details…\n\n```speak\nFence recap.\n```\n"
+        assert _strip_markdown_for_tts(text) == "Fence recap."
+
+    def test_speak_blocks_concatenated(self):
+        text = (
+            "<!-- speak -->First.<!-- /speak -->\n"
+            "middle junk\n"
+            "```speak\nSecond.\n```\n"
+        )
+        assert _strip_markdown_for_tts(text) == "First. Second."
+
+    def test_empty_speak_blocks_fall_through(self):
+        text = "Hello **world**\n\n<!-- speak -->\n\n<!-- /speak -->"
+        assert _strip_markdown_for_tts(text) == "Hello world"
+
 
 # ============================================================================
 # Voice command parsing

@@ -3811,9 +3811,16 @@ class BasePlatformAdapter(ABC):
     def prepare_tts_text(self, text: str) -> str:
         """Prepare text for TTS. Override to filter tool output, code, etc.
 
-        Default strips markdown formatting and truncates to 4000 chars.
+        Default strips markdown (and dual-document speak blocks) then truncates
+        to 4000 chars. Prefer tools.tts_tool._strip_markdown_for_tts so gateway
+        auto-TTS matches Desktop read-aloud speak-marker semantics.
         """
-        return re.sub(r'[*_`#\[\]()]', '', text)[:4000].strip()
+        try:
+            from tools.tts_tool import _strip_markdown_for_tts
+            cleaned = _strip_markdown_for_tts(text or '')
+        except Exception:
+            cleaned = re.sub(r'[*_`#\[\]()]', '', text or '')
+        return cleaned[:4000].strip()
 
     async def play_tts(
         self,

@@ -171,6 +171,30 @@ When TTS is enabled, the agent speaks its reply **sentence-by-sentence** as it g
 
 The same pipeline runs in the classic CLI, the TUI, and the desktop app. In a desktop voice conversation the reply text is fed **live** into a per-reply speech WebSocket as the model generates it, so speech overlaps generation — one socket and one audio clock per reply, no per-sentence connection gaps.
 
+### Speak-only blocks
+
+For dual-document replies (detailed text on screen, short recap for the ear), wrap the spoken part so TTS ignores the body:
+
+```markdown
+Long answer with tables and bullets…
+
+<!-- speak -->
+Short ear-first recap only.
+<!-- /speak -->
+```
+
+A fenced form is also accepted:
+
+````markdown
+```speak
+Short ear-first recap only.
+```
+````
+
+**Rule:** if one or more speak blocks are present, Desktop read-aloud, gateway auto-TTS, and CLI speak paths synthesize **only** those blocks (concatenated in order). If none are present, the full sanitized message is spoken (unchanged). Empty speak blocks fall through to full-message speech.
+
+Live *streaming* voice conversation may still start speaking body deltas before the closing marker arrives; completed one-shot read-aloud always honors the blocks.
+
 ### Barge-in
 
 You can interrupt the agent mid-speech:
