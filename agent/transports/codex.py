@@ -358,7 +358,16 @@ class ResponsesApiTransport(ProviderTransport):
                 if github_reasoning is not None:
                     kwargs["reasoning"] = github_reasoning
             else:
-                kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+                from agent.model_metadata import openai_supports_reasoning_effort
+
+                # OpenAI rejects `reasoning.effort` on its non-reasoning
+                # families (gpt-4o, gpt-4.1, gpt-4-turbo, gpt-3.5) with HTTP
+                # 400, and every api.openai.com request routes through the
+                # Responses API — so a curated catalog pick like gpt-4o-mini
+                # would fail on every turn. Send no `reasoning` key for those
+                # models, same as the xAI branch above.
+                if openai_supports_reasoning_effort(model):
+                    kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
                 kwargs["include"] = (
                     ["reasoning.encrypted_content"] if replay_encrypted_reasoning else []
                 )

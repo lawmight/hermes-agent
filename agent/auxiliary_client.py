@@ -1046,10 +1046,16 @@ class _CodexCompletionsAdapter:
                     # match the main-agent Codex transport behavior.
                     if effort == "minimal":
                         effort = "low"
-                    resp_kwargs["reasoning"] = {
-                        "effort": effort,
-                        "summary": "auto",
-                    }
+                    from agent.model_metadata import openai_supports_reasoning_effort
+
+                    # OpenAI's non-reasoning families 400 on
+                    # `reasoning.effort`; drop the dial rather than fail the
+                    # auxiliary call, matching agent/transports/codex.py.
+                    if openai_supports_reasoning_effort(model):
+                        resp_kwargs["reasoning"] = {
+                            "effort": effort,
+                            "summary": "auto",
+                        }
                     resp_kwargs["include"] = ["reasoning.encrypted_content"]
 
         # Tools support for auxiliary callers (e.g. skills_hub) that pass function schemas

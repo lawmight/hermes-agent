@@ -411,6 +411,44 @@ def grok_supports_reasoning_effort(model: str) -> bool:
     return any(name.startswith(prefix) for prefix in _GROK_EFFORT_CAPABLE_PREFIXES)
 
 
+# OpenAI models that REJECT the `reasoning.effort` parameter on
+# api.openai.com's /v1/responses. Verified live 2026-07-28:
+#
+#   REJECTS effort:  gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini,
+#                    gpt-4-turbo, gpt-3.5-turbo
+#                    ("Unsupported parameter: 'reasoning.effort' is not
+#                     supported with this model")
+#   ACCEPTS effort:  gpt-5.x, o1/o3/o4, codex
+#
+# Hermes routes every api.openai.com request through the Responses API
+# (see hermes_cli/runtime_provider._detect_api_mode_for_url), and the
+# curated `openai-api` catalog offers these legacy models, so without a
+# gate picking one of them 400s on every turn. Denylist rather than
+# allowlist: OpenAI's reasoning line keeps growing, while the
+# non-reasoning families are a closed legacy set.
+_OPENAI_NON_REASONING_PREFIXES = (
+    "gpt-4",
+    "gpt-3",
+    "chatgpt-4o",
+)
+
+
+def openai_supports_reasoning_effort(model: str) -> bool:
+    """Return True when an OpenAI model accepts ``reasoning.effort``.
+
+    Denylist by prefix, applied after stripping aggregator prefixes
+    (``openai/gpt-4o`` → ``gpt-4o``). Unknown models are treated as
+    reasoning-capable so new releases work without a table update; only
+    the known-rejecting legacy families are excluded.
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return True
+    if "/" in name:
+        name = name.rsplit("/", 1)[-1]
+    return not name.startswith(_OPENAI_NON_REASONING_PREFIXES)
+
+
 _CONTEXT_LENGTH_KEYS = (
     "context_length",
     "context_window",

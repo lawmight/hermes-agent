@@ -25,6 +25,7 @@ from agent.model_metadata import (
     estimate_messages_tokens_rough,
     get_model_context_length,
     get_next_probe_tier,
+    openai_supports_reasoning_effort,
     get_cached_context_length,
     parse_context_limit_from_error,
     save_context_length,
@@ -2075,3 +2076,52 @@ class TestMoAContextLength:
 
         assert ctx == 999_999
         endpoint_probe.assert_not_called()
+
+
+class TestOpenAIReasoningEffortSupport:
+    """`reasoning.effort` gating for OpenAI's Responses route.
+
+    Verified live against api.openai.com/v1/responses on 2026-07-28: the
+    gpt-4/gpt-3.5 families answer 400 "Unsupported parameter:
+    'reasoning.effort' is not supported with this model", while gpt-5.x and
+    the o-series accept the dial.
+    """
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4-turbo",
+            "gpt-3.5-turbo",
+            "openai/gpt-4o-mini",
+            "GPT-4O-MINI",
+        ],
+    )
+    def test_non_reasoning_models_reject_the_dial(self, model):
+        assert openai_supports_reasoning_effort(model) is False
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gpt-5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.6-sol",
+            "gpt-5-codex",
+            "o1",
+            "o3-mini",
+            "o4-mini",
+            "openai/gpt-5.4",
+        ],
+    )
+    def test_reasoning_models_keep_the_dial(self, model):
+        assert openai_supports_reasoning_effort(model) is True
+
+    def test_unknown_model_defaults_to_supported(self):
+        """New releases work without a table update — only the closed set of
+        legacy families is denied."""
+        assert openai_supports_reasoning_effort("some-future-model") is True
+        assert openai_supports_reasoning_effort("") is True

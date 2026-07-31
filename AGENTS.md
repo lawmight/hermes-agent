@@ -473,7 +473,9 @@ npm run build     # full build (hermes-ink + tsc)
 npm run typecheck # typecheck only (tsc --noEmit)
 npm run lint      # eslint
 npm run fmt       # prettier
-npm test          # vitest
+npm run check     # build:ink + typecheck + test + lint (what CI runs)
+npm test          # vitest — needs `npm run build:ink` first, or ~47 suites
+                  # fail on "Cannot find module './dist/entry-exports.js'"
 ```
 
 ### TUI in the Dashboard (`hermes dashboard` → `/chat`)

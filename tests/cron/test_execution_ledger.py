@@ -439,3 +439,60 @@ def test_job_listing_exposes_latest_execution(monkeypatch, tmp_path):
     listed = jobs.list_jobs(include_disabled=True)
     assert listed[0]["latest_execution"]["id"] == record["id"]
     assert listed[0]["latest_execution"]["status"] == "running"
+
+
+def test_ledger_follows_hermes_home_changed_after_import(monkeypatch, tmp_path):
+    """A HERMES_HOME repoint after import must move the ledger with it.
+
+    The ledger is profile-local. Resolving it from the import-time constant
+    sent every profile's attempts — and every test whose isolation fixture ran
+    after import — into whichever home happened to be active at import.
+    """
+    import cron.executions as executions
+
+    home = tmp_path / "profile-home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    executions.create_execution("late-repoint", source="builtin")
+
+    assert (home / "cron" / "executions.db").is_file()
+    assert executions.list_executions(job_id="late-repoint")
+    assert not executions._IMPORT_EXECUTIONS_FILE.is_file() or (
+        executions._IMPORT_EXECUTIONS_FILE.parent != home / "cron"
+    )
+
+
+def test_ledger_follows_use_cron_store_scope(monkeypatch, tmp_path):
+    """Each profile's tick writes its own ledger, not the process default."""
+    import cron.executions as executions
+    import cron.jobs as jobs
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "default-home"))
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+
+    with jobs.use_cron_store(profile_a):
+        executions.create_execution("job-a", source="builtin")
+    with jobs.use_cron_store(profile_b):
+        executions.create_execution("job-b", source="builtin")
+
+    def job_ids(home: Path) -> list[str]:
+        with sqlite3.connect(home / "cron" / "executions.db") as conn:
+            return [r[0] for r in conn.execute("SELECT job_id FROM executions")]
+
+    assert job_ids(profile_a) == ["job-a"]
+    assert job_ids(profile_b) == ["job-b"]
+
+
+def test_repointed_module_constant_still_wins(monkeypatch, tmp_path):
+    """The documented escape hatch keeps working for callers that pin a path."""
+    import cron.executions as executions
+
+    pinned = tmp_path / "pinned" / "executions.db"
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "ignored-home"))
+    monkeypatch.setattr(executions, "EXECUTIONS_FILE", pinned)
+
+    executions.create_execution("pinned-job", source="builtin")
+
+    assert pinned.is_file()
+    assert not (tmp_path / "ignored-home" / "cron" / "executions.db").exists()
