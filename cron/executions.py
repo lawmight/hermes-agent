@@ -43,14 +43,17 @@ def _current_executions_file() -> Path:
     A re-pointed module constant still wins, so callers pinning the path
     keep working.
     """
-    if EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE:
+    if EXECUTIONS_FILE is not None and EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE:
         return EXECUTIONS_FILE
     try:
-        from cron.jobs import get_cron_dir
+        from cron.jobs import _cron_store_override
 
-        return get_cron_dir() / "executions.db"
+        override = _cron_store_override.get()
+        if override is not None:
+            return override.cron_dir / "executions.db"
     except Exception:
-        return get_hermes_home().resolve() / "cron" / "executions.db"
+        pass
+    return get_hermes_home().resolve() / "cron" / "executions.db"
 
 
 def _connect() -> sqlite3.Connection:
