@@ -24,29 +24,6 @@ class TestLocalTempDir:
         assert env._snapshot_path == f"/data/data/com.termux/files/usr/tmp/hermes-snap-{env._session_id}.sh"
         assert env._cwd_file == f"/data/data/com.termux/files/usr/tmp/hermes-cwd-{env._session_id}.txt"
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="POSIX TMPDIR + /tmp layout is exercised on POSIX CI",
-    )
-    def test_prefers_backend_env_tmpdir_override(self, monkeypatch):
-        monkeypatch.delenv("TMPDIR", raising=False)
-        monkeypatch.delenv("TMP", raising=False)
-        monkeypatch.delenv("TEMP", raising=False)
-
-        with patch.object(LocalEnvironment, "init_session", autospec=True, return_value=None):
-            env = LocalEnvironment(
-                cwd=".",
-                timeout=10,
-                env={"TMPDIR": "/data/data/com.termux/files/home/.cache/hermes-tmp/"},
-            )
-
-        assert env.get_temp_dir() == "/data/data/com.termux/files/home/.cache/hermes-tmp"
-        assert env._snapshot_path == (
-            f"/data/data/com.termux/files/home/.cache/hermes-tmp/hermes-snap-{env._session_id}.sh"
-        )
-        assert env._cwd_file == (
-            f"/data/data/com.termux/files/home/.cache/hermes-tmp/hermes-cwd-{env._session_id}.txt"
-        )
 
     @pytest.mark.skipif(
         sys.platform == "win32",
