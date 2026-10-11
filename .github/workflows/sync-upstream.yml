@@ -4,23 +4,24 @@
 # fork-local commits are preserved.
 #
 # Landing strategy:
-#   - schedule (+ clean merge): push directly to the default branch
-#     (set-and-forget; keeps the fork current)
+#   - schedule: open/update a sync PR while direct pushes are disabled
+#   - enable PUSH_TO_MAIN_ENABLED only after a successful PR-mode validation
 #   - workflow_dispatch mode=pull_request: open/update a sync PR
 #   - workflow_dispatch mode=push_to_main: push directly when clean
 #
-# Required repo secret (GITHUB_TOKEN cannot update workflow files):
+# Checkout uses GITHUB_TOKEN without persisted credentials. The PAT is used
+# only for credential checks and pushes; PR operations use GITHUB_TOKEN.
+# Required repo secret when upstream changes workflows:
 #   UPSTREAM_SYNC_TOKEN — PAT (classic or fine-grained) with:
 #     - contents: read/write
 #     - workflows: read/write   ← required whenever upstream touches
 #       `.github/workflows/*`; without it the push is rejected with
 #       "refusing to allow a GitHub App to create or update workflow"
-#     - pull-requests: read/write (optional but preferred so `gh pr`
-#       runs as the PAT; otherwise the job falls back to GITHUB_TOKEN
-#       for PR create/edit)
+#     - pull-requests: read/write is not needed for this PAT;
+#       PR create/edit uses GITHUB_TOKEN with pull-requests: write
 #   Classic PAT: `repo` + `workflow` scopes.
 #   Fine-grained: Contents + Workflows (Read and write) on this fork;
-#   add Pull requests (Read and write) when possible.
+#   Allow GitHub Actions to create pull requests in repository settings.
 
 name: Sync upstream
 
@@ -36,7 +37,7 @@ on:
         options:
           - push_to_main
           - pull_request
-        default: push_to_main
+        default: pull_request
       force_pr_on_conflict:
         description: "Open a conflict-marker PR when merge fails (for manual resolution)"
         type: boolean
@@ -59,17 +60,86 @@ jobs:
     env:
       UPSTREAM_REPO: NousResearch/hermes-agent
       UPSTREAM_BRANCH: main
-      SYNC_BRANCH: sync/upstream-main
-      # Prefer a dedicated PAT so opened PRs still run CI and so workflow
-      # file updates from upstream can be pushed. Fall back to GITHUB_TOKEN.
-      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+      # Branch-ref validation must not overwrite the production sync branch.
+      SYNC_BRANCH: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'sync/upstream-main' || 'sync/upstream-auth-validation' }}
+      # Re-enable in a reviewed change only after PR-mode validation succeeds.
+      PUSH_TO_MAIN_ENABLED: 'false'
       HAS_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN != '' }}
     steps:
       - name: Checkout fork
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # v5 avoids v6's path-dependent includeIf credential configuration.
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
-          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      - name: Diagnose sync push credentials
+        env:
+          SYNC_PUSH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          import pathlib
+          import subprocess
+          import tempfile
+          import urllib.error
+          import urllib.request
+
+          token = os.environ["SYNC_PUSH_TOKEN"]
+          server = os.environ["GITHUB_SERVER_URL"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          header = "AUTHORIZATION: basic " + base64.b64encode(
+              ("x-access-token:" + token).encode()
+          ).decode()
+          print("::add-mask::" + header)
+
+          # Probe v6's exact gitdir condition without writing any credential.
+          # Only report whether Git includes the file; never print config values.
+          gitdir = str(pathlib.Path(".git").resolve())
+          with tempfile.TemporaryDirectory() as tmp:
+              cred = pathlib.Path(tmp) / "probe.config"
+              cred.write_text('[syncprobe]\n  included = true\n')
+              config = pathlib.Path(tmp) / "include.config"
+              subprocess.run(["git", "config", "--file", str(config),
+                              "includeIf.gitdir:" + gitdir + ".path", str(cred)],
+                             check=True)
+              probe = subprocess.run(["git", "-c", "include.path=" + str(config),
+                                      "config", "--get", "syncprobe.included"],
+                                     capture_output=True, text=True)
+              print("Original v6 includeIf condition matches: " +
+                    str(probe.returncode == 0).lower())
+
+          def check(url, authorization, label):
+              request = urllib.request.Request(url, headers={
+                  "Authorization": authorization,
+                  "User-Agent": "hermes-upstream-sync",
+              })
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      status = response.status
+              except urllib.error.HTTPError as error:
+                  status = error.code
+              print(label + ": HTTP " + str(status))
+              if status == 401:
+                  raise SystemExit("::error::Sync token rejected: invalid, expired, or revoked. Obtain authorization before rotation.")
+              if status != 200:
+                  raise SystemExit("::error::Sync token access denied or unavailable. Check repository selection, Contents read/write, and account/policy authorization; do not assume expiration.")
+
+          if os.environ["HAS_SYNC_TOKEN"] == "true":
+              check(os.environ["GITHUB_API_URL"] + "/user",
+                    "Bearer " + token, "PAT identity authentication")
+          check(server + "/" + repo + ".git/info/refs?service=git-receive-pack",
+                header.split(": ", 1)[1], "Git push authorization (no ref changes)")
+          print("Push credential accepted. Workflows write permission is verified by the actual sync-branch push.")
+          PY
+
+      - name: Block direct-push mode until PR validation succeeds
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'push_to_main' && env.PUSH_TO_MAIN_ENABLED != 'true'
+        run: |
+          echo "::error::Direct pushes are disabled. Validate with mode=pull_request before re-enabling PUSH_TO_MAIN_ENABLED."
+          exit 1
 
       - name: Configure git identity
         run: |
@@ -77,10 +147,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Fetch upstream
+        env:
+          CHECKOUT_TOKEN: ${{ github.token }}
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null \
             || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch --no-tags origin "${{ github.event.repository.default_branch }}"
+          AUTH=$(printf 'x-access-token:%s' "${CHECKOUT_TOKEN}" | base64 -w0)
+          echo "::add-mask::${AUTH}"
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH}" \
+            git fetch --no-tags origin "${{ github.event.repository.default_branch }}"
           git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
 
       - name: Measure drift
@@ -134,7 +210,7 @@ jobs:
             fi
           fi
 
-      - name: Warn when sync token missing and workflows changed
+      - name: Require a workflow-capable token when workflows changed
         if: >
           steps.drift.outputs.behind != '0'
           && (steps.merge.outputs.clean == 'true' || steps.merge.outputs.conflict_pr == 'true')
@@ -149,16 +225,27 @@ jobs:
               echo "This sync updates files under \`.github/workflows/\`."
               echo "\`GITHUB_TOKEN\` cannot push those changes."
               echo ""
-              echo "Add repo secret **UPSTREAM_SYNC_TOKEN** (PAT with Contents,"
-              echo "Pull requests, and **Workflows** read/write), then re-run."
+              echo "After authorization, set repo secret **UPSTREAM_SYNC_TOKEN**"
+              echo "with Contents and Workflows read/write, then re-run."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning title=Missing UPSTREAM_SYNC_TOKEN::Sync touches workflow files; GITHUB_TOKEN push will likely be rejected. Set UPSTREAM_SYNC_TOKEN with workflows write permission."
+            echo "::error title=Missing UPSTREAM_SYNC_TOKEN::Sync touches workflow files. Set UPSTREAM_SYNC_TOKEN with Contents and Workflows read/write after authorization."
+            exit 1
           fi
 
       - name: Push sync branch
         id: push
         if: steps.drift.outputs.behind != '0' && (steps.merge.outputs.clean == 'true' || steps.merge.outputs.conflict_pr == 'true')
+        env:
+          SYNC_PUSH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
         run: |
+          # Supply push credentials only to this step, without storing them.
+          AUTH=$(printf 'x-access-token:%s' "${SYNC_PUSH_TOKEN}" | base64 -w0)
+          echo "::add-mask::${AUTH}"
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" GIT_CONFIG_VALUE_0=""
+          export GIT_CONFIG_KEY_1="http.${GITHUB_SERVER_URL}/.extraheader"
+          export GIT_CONFIG_VALUE_1="AUTHORIZATION: basic ${AUTH}"
+          export GIT_TERMINAL_PROMPT=0
           set +e
           PUSH_OUT=$(git push -u origin "${SYNC_BRANCH}" --force-with-lease 2>&1)
           PUSH_STATUS=$?
@@ -178,7 +265,7 @@ jobs:
               echo "\`.github/workflows/*\` and the token lacks the **workflows** permission."
               echo ""
               echo "Fix:"
-              echo "1. Create a PAT with Contents, Pull requests, and Workflows (read/write)"
+              echo "1. After authorization, create a PAT with Contents and Workflows (read/write)"
               echo "   — classic: \`repo\` + \`workflow\` scopes"
               echo "2. Store it as repo secret \`UPSTREAM_SYNC_TOKEN\`"
               echo "3. Re-run **Sync upstream**"
@@ -195,11 +282,23 @@ jobs:
           steps.drift.outputs.behind != '0'
           && steps.merge.outputs.clean == 'true'
           && steps.push.outputs.pushed == 'true'
+          && env.PUSH_TO_MAIN_ENABLED == 'true'
+          && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
           && (
             github.event_name == 'schedule'
             || (github.event_name == 'workflow_dispatch' && inputs.mode == 'push_to_main')
           )
+        env:
+          SYNC_PUSH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
         run: |
+          # Supply push credentials only to this step, without storing them.
+          AUTH=$(printf 'x-access-token:%s' "${SYNC_PUSH_TOKEN}" | base64 -w0)
+          echo "::add-mask::${AUTH}"
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" GIT_CONFIG_VALUE_0=""
+          export GIT_CONFIG_KEY_1="http.${GITHUB_SERVER_URL}/.extraheader"
+          export GIT_CONFIG_VALUE_1="AUTHORIZATION: basic ${AUTH}"
+          export GIT_TERMINAL_PROMPT=0
           DEFAULT_BRANCH="${{ steps.drift.outputs.default_branch }}"
           set +e
           PUSH_OUT=$(git push origin "${SYNC_BRANCH}:${DEFAULT_BRANCH}" 2>&1)
@@ -237,6 +336,7 @@ jobs:
           && steps.push_main.outcome != 'success'
           && (
             (github.event_name == 'workflow_dispatch' && inputs.mode == 'pull_request')
+            || (github.event_name == 'schedule' && env.PUSH_TO_MAIN_ENABLED != 'true')
             || steps.merge.outputs.conflict_pr == 'true'
           )
         env:
@@ -326,8 +426,7 @@ jobs:
             exit 0
           fi
 
-          # Branch is already on the remote; don't fail the whole sync when
-          # this fork's tokens cannot mutate pull requests.
+          # A branch push alone does not complete PR-mode validation.
           {
             echo "## Sync branch pushed; PR create/update blocked"
             echo ""
@@ -338,11 +437,11 @@ jobs:
             printf '%s\n' "${RESP}"
             echo '```'
             echo ""
-            echo "Open or refresh the PR manually, or re-run with"
-            echo "\`mode=push_to_main\` (the scheduled path) to land on \`${DEFAULT_BRANCH}\`."
+            echo "Allow GitHub Actions to create pull requests in repository settings,"
+            echo "or open the PR manually. Keep direct pushes disabled until PR validation succeeds."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::warning title=PR create/update blocked::Sync branch pushed, but PR mutation failed. Use mode=push_to_main or open the PR manually."
-          exit 0
+          echo "::error title=PR create/update blocked::Sync branch pushed, but PR validation is incomplete. Allow Actions to create pull requests or open the PR manually."
+          exit "${STATUS}"
 
       - name: Fail clearly when merge conflicts (no conflict PR)
         if: >
