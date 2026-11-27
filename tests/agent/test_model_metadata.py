@@ -1705,7 +1705,7 @@ class TestContextLengthCache:
         ``os.replace`` write leaves the previous file byte-for-byte intact
         when the swap fails.
         """
-        import utils
+        import utils.files
         import agent.model_metadata as mm
 
         cache_file = tmp_path / "cache.yaml"
@@ -1719,7 +1719,7 @@ class TestContextLengthCache:
         def _boom(*_args, **_kwargs):
             raise OSError("simulated crash during atomic replace")
 
-        monkeypatch.setattr(utils, "atomic_replace", _boom)
+        monkeypatch.setattr(utils.files, "atomic_replace", _boom)
 
         # save_context_length is best-effort and swallows the error.
         save_context_length("model-b", "http://b", 128000)
@@ -2053,7 +2053,7 @@ def test_endpoint_pricing_per_token_quotes_pass_through_unchanged():
 
 
 class TestOpenAIReasoningEffortSupport:
-    """Fork denylist: legacy chat models reject reasoning.effort; new ones keep it."""
+    """Legacy chat models reject a Responses reasoning field. Unknown models do not."""
 
     @pytest.mark.parametrize(
         "model",
@@ -2069,9 +2069,9 @@ class TestOpenAIReasoningEffortSupport:
         ],
     )
     def test_legacy_chat_models_reject_effort(self, model):
-        from agent.model_metadata import openai_supports_reasoning_effort
+        from agent.model_metadata import openai_model_rejects_reasoning
 
-        assert openai_supports_reasoning_effort(model) is False
+        assert openai_model_rejects_reasoning(model) is True
 
     @pytest.mark.parametrize(
         "model",
@@ -2090,6 +2090,6 @@ class TestOpenAIReasoningEffortSupport:
         ],
     )
     def test_reasoning_and_unknown_models_keep_effort(self, model):
-        from agent.model_metadata import openai_supports_reasoning_effort
+        from agent.model_metadata import openai_model_rejects_reasoning
 
-        assert openai_supports_reasoning_effort(model) is True
+        assert openai_model_rejects_reasoning(model) is False
